@@ -123,7 +123,16 @@ click the greyed-out provider in the sidebar (or hit `/auth/google`, `/auth/spot
 Refresh tokens are handled automatically.
 
 Google scopes: `calendar` (read/write, for tasks) and `drive.readonly`.
-Spotify playback controls need Premium and an already-active device.
+
+Spotify scopes now include `playlist-read-private` and `playlist-read-collaborative`.
+**A stored token keeps the scopes it was granted**, so after pulling this change you have to
+disconnect and reconnect Spotify from the sidebar — otherwise the playlist calls come back 403
+and the panel says so. Playback controls, including picking a track, need Premium and an
+already-active device (open Spotify somewhere first; this is a remote control, not a player).
+
+Drive opens on My Drive and browses folders in place, with a breadcrumb; the search box looks
+across everything instead. Files are shown in the pane beside the list, streamed from the
+server, so nothing redirects to Google.
 
 ## API
 
@@ -134,9 +143,11 @@ Spotify playback controls need Premium and an already-active device.
 | `PATCH /api/tasks/:id` | `{done}` / `{title}` / `{start, minutes}` |
 | `DELETE /api/tasks/:id` | |
 | `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | markdown files |
-| `GET /api/drive?q=` | recent/searched files |
+| `GET /api/drive?folder=&q=` | browse a folder, or search everywhere |
 | `GET /api/drive/:id/preview` | streams the file from our own origin |
 | `GET /api/spotify`, `POST /api/spotify/:play\|pause\|next\|previous` | |
+| `GET /api/spotify/playlists[/:id]` | your playlists and their tracks |
+| `PUT /api/spotify/play` | `{uri, context}` — play one track in its playlist |
 | `GET /api/github` | repos, open PRs, recent activity |
 | `GET·POST·PATCH·DELETE /api/access[/users/:id]` | people, codes, devices, permissions |
 | `GET /api/access/device` | the caller's IP and resolved MAC |

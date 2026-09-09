@@ -55,8 +55,12 @@ const PROVIDERS = {
     authUrl: 'https://accounts.spotify.com/authorize',
     tokenUrl: 'https://accounts.spotify.com/api/token',
     api: 'https://api.spotify.com',
-    scope:
-      'user-read-currently-playing user-read-playback-state user-modify-playback-state user-read-recently-played',
+    // Adding a scope means the stored token no longer covers everything: reconnect Spotify
+    // from the sidebar after changing this line, or the new calls come back 403.
+    scope: [
+      'user-read-currently-playing', 'user-read-playback-state', 'user-modify-playback-state',
+      'user-read-recently-played', 'playlist-read-private', 'playlist-read-collaborative',
+    ].join(' '),
     extra: {},
     id: 'SPOTIFY_CLIENT_ID',
     secret: 'SPOTIFY_CLIENT_SECRET',
@@ -540,15 +544,35 @@ app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
 
 /* ---------- Drive ---------- */
 
+const FOLDER = 'application/vnd.google-apps.folder';
+const FILE_FIELDS = 'files(id,name,mimeType,modifiedTime,webViewLink,iconLink,size)';
+
+// Two modes: browsing one folder (the default, starting at My Drive) or searching everywhere.
 app.get('/api/drive', can('drive:read'), wrap(async (req) => {
   const term = String(req.query.q || '').trim().split(/[^ 0-9a-zA-Z._-]/).join('');
-  const q = new URLSearchParams({
-    q: term ? `name contains '${term}' and trashed = false` : 'trashed = false',
-    pageSize: '50',
-    orderBy: 'modifiedTime desc',
-    fields: 'files(id,name,mimeType,modifiedTime,webViewLink,iconLink,size)',
-  });
-  return (await api('google', `/drive/v3/files?${q}`)).files || [];
+  const folder = String(req.query.folder || 'root').split(/[^0-9a-zA-Z_-]/).join('');
+
+  const q = new URLSearchParams(term
+    ? {
+        q: `name contains '${term}' and trashed = false`,
+        orderBy: 'modifiedTime desc',
+        pageSize: '100',
+        fields: FILE_FIELDS,
+      }
+    : {
+        q: `'${folder}' in parents and trashed = false`,
+        // Folders first, then alphabetical — how a file browser is expected to behave.
+        orderBy: 'folder,name',
+        pageSize: '200',
+        fields: FILE_FIELDS,
+      });
+
+  const files = (await api('google', `/drive/v3/files?${q}`)).files || [];
+  return {
+    files: files.map((f) => ({ ...f, folder: f.mimeType === FOLDER })),
+    folder: term ? null : folder,
+    searching: !!term,
+  };
 }));
 
 // Google's own /preview iframe authenticates with the viewer's Google session cookies, which
@@ -621,6 +645,56 @@ app.get('/api/spotify', can('music:read'), wrap(async () => {
     api('spotify', '/v1/me/player/recently-played?limit=12').catch(() => ({ items: [] })),
   ]);
   return { now, recent: recent.items || [] };
+}));
+
+app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
+  const r = await api('spotify', '/v1/me/playlists?limit=50');
+  return (r.items || []).map((p) => ({
+    id: p.id,
+    uri: p.uri,
+    name: p.name,
+    owner: p.owner?.display_name || '',
+    tracks: p.tracks?.total ?? 0,
+    image: p.images?.at(-1)?.url || '',
+  }));
+}));
+
+app.get('/api/spotify/playlists/:id', can('music:read'), wrap(async (req) => {
+  const id = encodeURIComponent(req.params.id);
+  const [playlist, tracks] = await Promise.all([
+    api('spotify', `/v1/playlists/${id}?fields=name,uri,owner(display_name),images`),
+    api('spotify', `/v1/playlists/${id}/tracks?limit=100&fields=items(track(id,uri,name,duration_ms,artists(name),album(name,images)))`),
+  ]);
+  return {
+    id: req.params.id,
+    uri: playlist.uri,
+    name: playlist.name,
+    image: playlist.images?.at(-1)?.url || '',
+    // Local files and removed tracks come back as null and have no uri to play.
+    tracks: (tracks.items || []).map((i) => i.track).filter((t) => t?.uri).map((t) => ({
+      uri: t.uri,
+      name: t.name,
+      artists: t.artists.map((a) => a.name).join(', '),
+      album: t.album?.name || '',
+      image: t.album?.images?.at(-1)?.url || '',
+      ms: t.duration_ms,
+    })),
+  };
+}));
+
+// Playing a track inside its playlist context (rather than on its own) is what lets the
+// queue continue with the rest of the playlist afterwards.
+app.put('/api/spotify/play', can('music:control'), wrap(async (req) => {
+  const uri = String(req.body?.uri || '');
+  const context = String(req.body?.context || '');
+  if (!/^spotify:track:[A-Za-z0-9]+$/.test(uri)) throw fail(400, 'bad track uri');
+
+  const body = /^spotify:playlist:[A-Za-z0-9]+$/.test(context)
+    ? { context_uri: context, offset: { uri } }
+    : { uris: [uri] };
+
+  await api('spotify', '/v1/me/player/play', { method: 'PUT', body: JSON.stringify(body) });
+  return { ok: true };
 }));
 
 const CONTROLS = {

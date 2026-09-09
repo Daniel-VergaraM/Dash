@@ -98,9 +98,26 @@
   #preview blockquote { border-left: 3px solid var(--line); margin: 0; padding-left: 12px; color: var(--dim); }
 
   /* drive */
-  #driveFiles li img { width: 16px; height: 16px; }
-  #dvWrap { display: none; margin-top: 14px; }
-  #dvWrap iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  #driveWrap { display: grid; grid-template-columns: minmax(240px, 1fr) 2fr; gap: 14px;
+    height: calc(100vh - 170px); }
+  #driveFiles li img { width: 16px; height: 16px; flex: none; margin-top: 3px; }
+  #driveFiles a { cursor: pointer; }
+  #driveFiles li.on { background: var(--panel2); border-radius: 7px; padding-left: 6px; }
+  #dv { flex: 1; width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  #crumbs button { background: none; border: none; color: var(--accent); padding: 2px 4px; font-size: 12px; }
+  #crumbs span { color: var(--dim); }
+
+  /* music */
+  #musicWrap { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 16px;
+    margin-top: 16px; height: calc(100vh - 300px); min-height: 320px; }
+  #plList button { display: flex; gap: 9px; align-items: center; width: 100%; text-align: left;
+    background: none; border: none; padding: 6px 8px; border-radius: 8px; color: var(--dim); }
+  #plList button.on, #plList button:hover { background: var(--panel2); color: var(--fg); }
+  #plList img { width: 30px; height: 30px; border-radius: 4px; flex: none; background: var(--panel2); }
+  #trackList li { cursor: default; }
+  #trackList li.play { cursor: pointer; }
+  #trackList li.play:hover { background: var(--panel2); }
+  #trackList img { width: 32px; height: 32px; border-radius: 4px; flex: none; }
 
   /* access */
   nav .who { font-size: 12px; padding: 6px 11px; border-top: 1px solid var(--line); margin-bottom: 4px; }
@@ -226,16 +243,24 @@
     <section class="view" data-view="drive">
       <h2>Drive</h2>
       <div class="row">
-        <input id="driveQ" placeholder="Search files…" class="grow">
+        <input id="driveQ" placeholder="Search all files…" class="grow">
         <button id="driveGo">Search</button>
+        <button id="driveHome">My Drive</button>
       </div>
-      <div class="card" style="margin-top:14px"><ul class="list" id="driveFiles"></ul></div>
-      <div id="dvWrap"><div class="row" style="margin-bottom:6px"><b id="dvName"></b>
-        <a id="dvOpen" class="small" target="_blank" rel="noreferrer" style="margin-left:auto">open in Drive ↗</a>
-        <button id="dvClose">Close preview</button></div>
-        <iframe id="dv" referrerpolicy="no-referrer"></iframe>
-        <p class="muted small">Google Docs, Sheets and Slides are converted to PDF for this pane.
-          Formats the browser cannot display will download instead — use the Drive link above.</p></div>
+      <div id="crumbs" class="row small muted" style="margin:10px 0 4px"></div>
+      <div id="driveWrap">
+        <div class="card" style="overflow:auto"><ul class="list" id="driveFiles"></ul></div>
+        <div class="card" id="dvPane" style="display:flex;flex-direction:column">
+          <div class="row" style="margin-bottom:10px">
+            <b id="dvName" class="grow ellip">Preview</b>
+            <a id="dvOpen" class="small" target="_blank" rel="noreferrer" hidden>open in Drive ↗</a>
+          </div>
+          <iframe id="dv" referrerpolicy="no-referrer" hidden></iframe>
+          <div id="dvEmpty" class="muted" style="margin:auto;text-align:center;padding:40px">
+            Pick a file to view it here.
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="view" data-view="music">
@@ -249,7 +274,16 @@
           <span id="spErr" class="err small"></span>
         </div>
       </div>
-      <div class="card" style="margin-top:16px"><h3>Recently played</h3><ul class="list" id="recent"></ul></div>
+      <div id="musicWrap">
+        <div class="card" style="overflow:auto">
+          <h3>Playlists</h3>
+          <div id="plList"></div>
+        </div>
+        <div class="card" style="overflow:auto">
+          <h3 id="plTitle">Recently played</h3>
+          <ul class="list" id="trackList"></ul>
+        </div>
+      </div>
     </section>
 
     <section class="view" data-view="github">
@@ -625,32 +659,72 @@ loaders.notes = listNotes;
 
 /* ---------- drive ---------- */
 
-async function loadDrive() {
+// Where we are in the tree. Kept client-side so the breadcrumb needs no extra API calls.
+let drivePath = [{ id: 'root', name: 'My Drive' }];
+
+async function loadDrive(query) {
   const el = $('#driveFiles');
+  const searching = query !== undefined ? query : ($('#driveQ').value || '');
   el.innerHTML = '<p class="muted">Loading…</p>';
+  renderCrumbs(!!searching);
   try {
-    const files = await jf('/api/drive?q=' + encodeURIComponent($('#driveQ').value));
-    el.innerHTML = files.map((f) => `<li>
+    const url = searching
+      ? '/api/drive?q=' + encodeURIComponent(searching)
+      : '/api/drive?folder=' + encodeURIComponent(drivePath.at(-1).id);
+    const { files } = await jf(url);
+
+    el.innerHTML = files.map((f) => `<li data-row="${esc(f.id)}">
       <img src="${esc(f.iconLink || '')}" alt="">
-      <span class="grow ellip"><a href="#" data-id="${esc(f.id)}" data-name="${esc(f.name)}" data-link="${esc(f.webViewLink)}">${esc(f.name)}</a>
-        <div class="muted small">${esc(f.mimeType.split('.').pop())} · ${ago(f.modifiedTime)}</div></span>
-      <a class="small" href="${esc(f.webViewLink)}" target="_blank" rel="noreferrer">drive ↗</a></li>`).join('')
-      || '<p class="muted">No files.</p>';
+      <span class="grow ellip">
+        <a data-id="${esc(f.id)}" data-name="${esc(f.name)}" data-link="${esc(f.webViewLink || '')}"
+           data-folder="${f.folder ? '1' : ''}">${esc(f.name)}</a>
+        <div class="muted small">${f.folder ? 'folder' : esc(f.mimeType.split('.').pop())}
+          · ${ago(f.modifiedTime)}</div></span>
+    </li>`).join('') || '<p class="muted">This folder is empty.</p>';
+
     $$('#driveFiles a[data-id]').forEach((a) => (a.onclick = (e) => {
       e.preventDefault();
-      // Same origin, served by us from the OAuth token — Google's own /preview iframe needs
-      // the viewer's Google cookies, which are third-party here and blocked.
-      $('#dv').src = '/api/drive/' + encodeURIComponent(a.dataset.id) + '/preview';
-      $('#dvName').textContent = a.dataset.name;
-      $('#dvOpen').href = a.dataset.link || '#';
-      $('#dvWrap').style.display = 'block';
+      if (a.dataset.folder) {
+        drivePath.push({ id: a.dataset.id, name: a.dataset.name });
+        $('#driveQ').value = '';
+        loadDrive('');
+      } else {
+        openFile(a.dataset);
+      }
     }));
   } catch (err) { el.innerHTML = connectBox('google', err); }
 }
-$('#driveGo').onclick = loadDrive;
+
+function openFile(d) {
+  // Same origin, streamed by us from the OAuth token — Google's own /preview iframe needs the
+  // viewer's Google cookies, which are third-party here and blocked by default.
+  $('#dv').src = '/api/drive/' + encodeURIComponent(d.id) + '/preview';
+  $('#dv').hidden = false;
+  $('#dvEmpty').hidden = true;
+  $('#dvName').textContent = d.name;
+  $('#dvOpen').href = d.link || '#';
+  $('#dvOpen').hidden = !d.link;
+  $$('#driveFiles li').forEach((li) => li.classList.toggle('on', li.dataset.row === d.id));
+}
+
+function renderCrumbs(searching) {
+  $('#crumbs').innerHTML = searching
+    ? '<span>Search results</span>'
+    : drivePath.map((p, i) => (i ? '<span>/</span>' : '') + `<button data-depth="${i}">${esc(p.name)}</button>`).join('');
+  $$('#crumbs button').forEach((b) => (b.onclick = () => {
+    drivePath = drivePath.slice(0, Number(b.dataset.depth) + 1);
+    loadDrive('');
+  }));
+}
+
+$('#driveGo').onclick = () => loadDrive();
 $('#driveQ').addEventListener('keydown', (e) => e.key === 'Enter' && loadDrive());
-$('#dvClose').onclick = () => { $('#dvWrap').style.display = 'none'; $('#dv').src = ''; };
-loaders.drive = loadDrive;
+$('#driveHome').onclick = () => {
+  drivePath = [{ id: 'root', name: 'My Drive' }];
+  $('#driveQ').value = '';
+  loadDrive('');
+};
+loaders.drive = () => loadDrive();
 
 /* ---------- spotify ---------- */
 
@@ -665,22 +739,84 @@ async function loadNowPlaying(sel, miniOnly) {
         <div class="muted">${esc(t.artists.map((a) => a.name).join(', '))}</div>
         <div class="muted small">${esc(t.album.name)} · ${d.now.is_playing ? 'playing' : 'paused'}</div></div>`
       : '<p class="muted">Nothing playing.</p>';
-    if (!miniOnly) {
-      $('#recent').innerHTML = d.recent.map((r) => `<li><span class="grow ellip">${esc(r.track.name)}
+    // The right-hand pane starts on recently-played and is replaced once a playlist is opened.
+    if (!miniOnly && !openPlaylist) {
+      $('#plTitle').textContent = 'Recently played';
+      $('#trackList').innerHTML = d.recent.map((r) => `<li><span class="grow ellip">${esc(r.track.name)}
         <span class="muted">— ${esc(r.track.artists[0]?.name || '')}</span></span>
         <span class="muted small">${ago(r.played_at)}</span></li>`).join('')
         || '<p class="muted">Nothing recent.</p>';
     }
   } catch (err) { el.innerHTML = connectBox('spotify', err); }
 }
+
 $$('[data-cmd]').forEach((b) => (b.onclick = async () => {
   $('#spErr').textContent = '';
   try {
     await jf('/api/spotify/' + b.dataset.cmd, { method: 'POST' });
-    setTimeout(() => loadNowPlaying('#np'), 400);
+    setTimeout(() => loadNowPlaying('#np', true), 400);
   } catch (err) { $('#spErr').textContent = err.message + ' (playback control needs Premium + an active device)'; }
 }));
-loaders.music = () => loadNowPlaying('#np');
+
+/* --- playlists --- */
+
+let openPlaylist = null;
+const mmss = (ms) => {
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+async function loadPlaylists() {
+  try {
+    const lists = await jf('/api/spotify/playlists');
+    $('#plList').innerHTML = lists.map((p) => `<button data-pl="${esc(p.id)}" class="${p.id === openPlaylist ? 'on' : ''}">
+      <img src="${esc(p.image)}" alt="">
+      <span class="grow ellip">${esc(p.name)}<div class="muted small">${p.tracks} tracks</div></span>
+    </button>`).join('') || '<p class="muted small">No playlists.</p>';
+    $$('#plList [data-pl]').forEach((b) => (b.onclick = () => openList(b.dataset.pl)));
+  } catch (err) {
+    $('#plList').innerHTML = err.status === 403
+      ? '<p class="muted small">Reading playlists needs a scope the stored token does not have '
+        + '— reconnect Spotify from the sidebar.</p>'
+      : `<p class="err small">${esc(err.message)}</p>`;
+  }
+}
+
+async function openList(id) {
+  openPlaylist = id;
+  $('#trackList').innerHTML = '<p class="muted">Loading…</p>';
+  $$('#plList [data-pl]').forEach((b) => b.classList.toggle('on', b.dataset.pl === id));
+  try {
+    const pl = await jf('/api/spotify/playlists/' + encodeURIComponent(id));
+    $('#plTitle').textContent = pl.name;
+    const playable = can('music:control');
+    $('#trackList').innerHTML = pl.tracks.map((t, i) => `<li class="${playable ? 'play' : ''}"
+        data-uri="${esc(t.uri)}" title="${playable ? 'Play' : ''}">
+      <span class="muted small" style="width:24px;flex:none;text-align:right">${i + 1}</span>
+      <img src="${esc(t.image)}" alt="">
+      <span class="grow ellip">${esc(t.name)}
+        <div class="muted small ellip">${esc(t.artists)}</div></span>
+      <span class="muted small">${mmss(t.ms)}</span></li>`).join('')
+      || '<p class="muted">This playlist is empty.</p>';
+
+    if (!playable) return;
+    $$('#trackList [data-uri]').forEach((li) => (li.onclick = async () => {
+      $('#spErr').textContent = '';
+      try {
+        // Sent with the playlist as context so the queue carries on with the rest of it.
+        await jf('/api/spotify/play', {
+          method: 'PUT',
+          body: JSON.stringify({ uri: li.dataset.uri, context: pl.uri }),
+        });
+        setTimeout(() => loadNowPlaying('#np', true), 500);
+      } catch (err) {
+        $('#spErr').textContent = err.message + ' (needs Premium + an active device)';
+      }
+    }));
+  } catch (err) { $('#trackList').innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+}
+
+loaders.music = () => { loadNowPlaying('#np'); loadPlaylists(); };
 
 /* ---------- github ---------- */
 
