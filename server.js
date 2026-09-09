@@ -6,10 +6,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { noteName, macFromArp, taskWindow } from './lib.js';
 import {
-  CAPABILITIES, ROLES, initAuth, capsOf, allows, listUsers, getUser, createUser, updateUser,
-  deleteUser, userByCode, userByMac, startSession, sessionUser, endSession, sessionsOf,
-  audit, readAudit, lockedFor, recordFailure, clearFailures, validCode,
+  CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
+  updateUser, deleteUser, signIn, userByMac, startSession, sessionUser, endSession, sessionsOf,
+  audit, readAudit, lockedFor, recordFailure, clearFailures,
+  addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
+import {
+  generateRegistrationOptions, verifyRegistrationResponse,
+  generateAuthenticationOptions, verifyAuthenticationResponse,
+} from '@simplewebauthn/server';
 
 const execFileP = promisify(execFile);
 const DIR = import.meta.dirname;
@@ -20,7 +25,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 await fs.mkdir(NOTES, { recursive: true });
-await initAuth(DATA, process.env.ACCESS_CODE);
+await initAuth(DATA, process.env.ACCESS_PASSWORD);
 
 let tokens = JSON.parse(await fs.readFile(TOKEN_FILE, 'utf8').catch(() => '{}'));
 const saveTokens = () => fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2));
@@ -157,22 +162,114 @@ app.get('/api/me', wrap(async (req, res) => {
   return { auth: false };
 }));
 
-app.post('/api/login', wrap(async (req, res) => {
-  const ip = clientIp(req);
+const throttle = (ip) => {
   const wait = lockedFor(ip);
   if (wait) throw fail(429, `Too many attempts — try again in ${Math.ceil(wait / 60)} min.`);
+};
 
-  const code = String(req.body?.code ?? '');
-  const user = validCode(code) ? await userByCode(code) : null;
+app.post('/api/login', wrap(async (req, res) => {
+  const ip = clientIp(req);
+  throttle(ip);
+
+  const name = String(req.body?.name ?? '');
+  const user = await signIn(name, String(req.body?.password ?? ''));
   if (!user) {
     recordFailure(ip);
-    await audit('signin-failed', { ip });
-    throw fail(401, 'Wrong code');
+    await audit('signin-failed', { ip, name: name.slice(0, 40) });
+    // Deliberately does not say which half was wrong — that would confirm who exists.
+    throw fail(401, 'Wrong name or password');
   }
   clearFailures(ip);
-  await setSession(res, user, 'code', ip);
-  await audit('signin', { userId: user.id, name: user.name, via: 'code', ip });
-  return me(user, { via: 'code' });
+  await setSession(res, user, 'password', ip);
+  await audit('signin', { userId: user.id, name: user.name, via: 'password', ip });
+  return me(user, { via: 'password' });
+}));
+
+/* ---------- passkeys (WebAuthn) ---------- */
+
+// The RP ID must be exactly the hostname the page is served from, and the origin must match
+// the full URL — both come from BASE_URL so dev and the VPS stay consistent.
+const RP_ID = new URL(BASE_URL).hostname;
+const RP_ORIGIN = new URL(BASE_URL).origin;
+const RP_NAME = 'Dash';
+
+// Challenges are single-use and short-lived; losing them on restart is harmless.
+const challenges = new Map();
+const CHALLENGE_MS = 120_000;
+
+function putChallenge(res, challenge, userId = null) {
+  const id = crypto.randomBytes(16).toString('hex');
+  challenges.set(id, { challenge, userId, expires: Date.now() + CHALLENGE_MS });
+  const secure = BASE_URL.startsWith('https') ? ' Secure;' : '';
+  res.setHeader('set-cookie', `wac=${id}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=120`);
+}
+
+function takeChallenge(req) {
+  const id = (req.headers.cookie || '').match(/(?:^|;\s*)wac=([a-f0-9]{32})/)?.[1];
+  const entry = id && challenges.get(id);
+  if (id) challenges.delete(id); // single use, whether or not it verifies
+  if (!entry || entry.expires < Date.now()) throw fail(400, 'challenge expired — try again');
+  return entry;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of challenges) if (v.expires < now) challenges.delete(k);
+}, CHALLENGE_MS).unref();
+
+// --- signing in with a passkey: no name, no password ---
+
+app.post('/api/login/passkey/options', wrap(async (req, res) => {
+  throttle(clientIp(req));
+  const options = await generateAuthenticationOptions({
+    rpID: RP_ID,
+    // No allowCredentials: the browser offers whichever discoverable passkey matches this
+    // site, so the person never types a name.
+    userVerification: 'preferred',
+  });
+  putChallenge(res, options.challenge);
+  return options;
+}));
+
+app.post('/api/login/passkey', wrap(async (req, res) => {
+  const ip = clientIp(req);
+  throttle(ip);
+  const { challenge } = takeChallenge(req);
+
+  const response = req.body?.response;
+  const found = response?.id ? userByPasskey(response.id) : null;
+  if (!found) {
+    recordFailure(ip);
+    await audit('signin-failed', { ip, via: 'passkey' });
+    throw fail(401, 'Unknown passkey');
+  }
+
+  const verification = await verifyAuthenticationResponse({
+    response,
+    expectedChallenge: challenge,
+    expectedOrigin: RP_ORIGIN,
+    expectedRPID: RP_ID,
+    credential: {
+      id: found.passkey.id,
+      publicKey: Buffer.from(found.passkey.publicKey, 'base64url'),
+      counter: found.passkey.counter,
+      transports: found.passkey.transports,
+    },
+  }).catch((e) => { throw fail(401, e.message); });
+
+  if (!verification.verified) {
+    recordFailure(ip);
+    await audit('signin-failed', { ip, via: 'passkey' });
+    throw fail(401, 'Passkey rejected');
+  }
+
+  // A counter that goes backwards means the credential was cloned; the library flags it,
+  // and storing the new value is what makes the check work next time.
+  await touchPasskey(found.passkey.id, verification.authenticationInfo.newCounter);
+  clearFailures(ip);
+  await setSession(res, found.user, 'passkey', ip);
+  await audit('signin', { userId: found.user.id, name: found.user.name, via: 'passkey', ip });
+  return me(found.user, { via: 'passkey' });
 }));
 
 app.post('/api/logout', wrap(async (req, res) => {
@@ -197,6 +294,78 @@ const can = (...anyOf) => (req, res, next) =>
   allows(req.user, ...anyOf)
     ? next()
     : res.status(403).json({ error: `not allowed — needs ${anyOf.join(' or ')}` });
+
+/* ---------- your own account ---------- */
+
+// Changing your own password needs no capability, but does need the current one — a stolen
+// session should not be able to lock the real owner out.
+app.post('/api/me/password', wrap(async (req) => {
+  const current = String(req.body?.current ?? '');
+  if (req.user.passwordHash && !(await signIn(req.user.name, current))) {
+    recordFailure(clientIp(req));
+    throw fail(401, 'Current password is wrong');
+  }
+  await updateUser(req.user.id, { password: String(req.body?.next ?? '') });
+  await audit('password-changed', { userId: req.user.id, name: req.user.name });
+  return { ok: true };
+}));
+
+/* ---------- passkeys: registering your own ---------- */
+// No capability gate: these only ever touch the caller's own credentials.
+
+app.get('/api/passkeys', wrap(async (req) =>
+  passkeysOf(req.user.id).map(({ publicKey, ...p }) => p)));
+
+app.post('/api/passkeys/options', wrap(async (req, res) => {
+  const options = await generateRegistrationOptions({
+    rpName: RP_NAME,
+    rpID: RP_ID,
+    userID: Buffer.from(req.user.id, 'utf8'),
+    userName: req.user.name,
+    userDisplayName: req.user.name,
+    // residentKey: the passkey is stored on the device with enough context to be offered
+    // without a name — that is what makes the passwordless sign-in button work.
+    authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
+    // Stops the same authenticator being enrolled twice.
+    excludeCredentials: passkeysOf(req.user.id).map((p) => ({ id: p.id, transports: p.transports })),
+  });
+  putChallenge(res, options.challenge, req.user.id);
+  return options;
+}));
+
+app.post('/api/passkeys', wrap(async (req) => {
+  const { challenge, userId } = takeChallenge(req);
+  // The challenge is bound to the person who asked for it, so one session cannot enrol
+  // a passkey onto another account.
+  if (userId !== req.user.id) throw fail(400, 'challenge does not belong to this session');
+
+  const verification = await verifyRegistrationResponse({
+    response: req.body?.response,
+    expectedChallenge: challenge,
+    expectedOrigin: RP_ORIGIN,
+    expectedRPID: RP_ID,
+  }).catch((e) => { throw fail(400, e.message); });
+
+  if (!verification.verified) throw fail(400, 'passkey could not be verified');
+
+  const { credential } = verification.registrationInfo;
+  const saved = await addPasskey(req.user.id, {
+    id: credential.id,
+    publicKey: Buffer.from(credential.publicKey).toString('base64url'),
+    counter: credential.counter,
+    transports: credential.transports,
+    label: req.body?.label,
+  });
+  await audit('passkey-added', { userId: req.user.id, name: req.user.name, label: saved.label });
+  const { publicKey, ...safe } = saved;
+  return safe;
+}));
+
+app.delete('/api/passkeys/:id', wrap(async (req) => {
+  await removePasskey(req.user.id, req.params.id);
+  await audit('passkey-removed', { userId: req.user.id, name: req.user.name });
+  return { ok: true };
+}));
 
 /* ---------- people, devices, permissions ---------- */
 

@@ -19,3 +19,10 @@
 {"at":1788974129060,"event":"signin-failed","ip":"127.0.0.1"}
 {"at":1788974129367,"event":"signin-failed","ip":"127.0.0.1"}
 {"at":1788974129654,"event":"signin-failed","ip":"127.0.0.1"}
+{"at":1788986195774,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}
+{"at":1788986196098,"event":"signin-failed","ip":"127.0.0.1","name":"Owner"}
+{"at":1788986196440,"event":"signin-failed","ip":"127.0.0.1","name":"Fantasma"}
+{"at":1788986211615,"event":"signin-failed","ip":"127.0.0.1","via":"passkey"}
+{"at":1788986227209,"event":"password-changed","userId":"u_4f4492559a53","name":"Owner"}
+{"at":1788986227535,"event":"signin-failed","ip":"127.0.0.1","name":"Owner"}
+{"at":1788986249404,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}

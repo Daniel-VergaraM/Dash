@@ -36,8 +36,11 @@
     padding: 28px; width: 320px; text-align: center; }
   #gate h1 { margin: 0 0 4px; font-size: 20px; }
   #gate p { color: var(--dim); margin: 0 0 18px; font-size: 13px; }
-  #code { width: 100%; text-align: center; letter-spacing: 10px; font-size: 22px; padding: 12px; }
-  #gate button { width: 100%; margin-top: 12px; }
+  #gate input { width: 100%; padding: 11px; margin-bottom: 8px; }
+  #gate button { width: 100%; margin-top: 4px; }
+  .or { display: flex; align-items: center; gap: 10px; color: var(--dim);
+    font-size: 12px; margin: 14px 0 10px; }
+  .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   #gateErr { color: var(--bad); min-height: 20px; font-size: 13px; margin-top: 8px; }
 
   /* shell */
@@ -138,9 +141,12 @@
 <div id="gate">
   <form id="loginForm">
     <h1>Dash</h1>
-    <p>Enter your 6-digit access code</p>
-    <input id="code" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
-    <button class="primary" type="submit">Unlock</button>
+    <p>Sign in</p>
+    <input id="loginName" placeholder="Name" autocomplete="username" autofocus>
+    <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="primary" type="submit">Sign in</button>
+    <div class="or" id="passkeyRow" hidden><span>or</span></div>
+    <button type="button" id="passkeyBtn" hidden>Use a passkey</button>
     <div id="gateErr"></div>
   </form>
 </div>
@@ -154,6 +160,7 @@
     <button data-view="drive" data-cap="drive:read">Drive</button>
     <button data-view="music" data-cap="music:read">Music</button>
     <button data-view="github" data-cap="github:read">GitHub</button>
+    <button data-view="account">Account</button>
     <button data-view="access" data-cap="users:manage">Access</button>
     <div class="spacer"></div>
     <div class="who" id="who"></div>
@@ -245,6 +252,35 @@
       <div class="grid" id="ghWrap"></div>
     </section>
 
+    <section class="view" data-view="account">
+      <h2>Account</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Change your password</h3>
+          <form id="pwForm">
+            <input id="pwCurrent" type="password" placeholder="Current password"
+                   autocomplete="current-password" style="width:100%;margin-bottom:8px">
+            <input id="pwNext" type="password" placeholder="New password"
+                   autocomplete="new-password" style="width:100%;margin-bottom:8px">
+            <input id="pwConfirm" type="password" placeholder="Repeat new password"
+                   autocomplete="new-password" style="width:100%;margin-bottom:10px">
+            <button class="primary" type="submit">Update password</button>
+            <div id="pwMsg" class="small" style="margin-top:8px"></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>Passkeys</h3>
+          <p class="muted small" style="margin-top:-6px">
+            Sign in with your fingerprint, face or device PIN — no password to type or leak.
+          </p>
+          <ul class="list" id="pkList"></ul>
+          <button class="primary" id="pkAdd" style="margin-top:12px">+ Add a passkey</button>
+          <div id="pkMsg" class="small" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="view" data-view="access">
       <h2>Access</h2>
       <div class="card">
@@ -274,8 +310,8 @@
             <option value="custom">Custom — pick capabilities below</option>
           </select>
         </label>
-        <label>6-digit code <span class="muted small" id="ufCodeHint"></span>
-          <input id="ufCode" inputmode="numeric" maxlength="6" placeholder="------" autocomplete="off">
+        <label>Password <span class="muted small" id="ufPassHint"></span>
+          <input id="ufPass" type="password" placeholder="at least 10 characters" autocomplete="new-password">
         </label>
         <label>Device MACs <span class="muted small">comma separated — these sign in without a code</span>
           <input id="ufMacs" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off">
@@ -334,12 +370,79 @@ const ago = (iso) => {
 
 /* ---------- auth ---------- */
 
+/* --- WebAuthn wire format: the API speaks ArrayBuffer, JSON speaks base64url --- */
+
+const b64uToBuf = (s) => {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+};
+const bufToB64u = (b) =>
+  btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+// Only the fields the server verifies; anything else the authenticator returns is noise.
+const credToJSON = (c) => ({
+  id: c.id,
+  rawId: bufToB64u(c.rawId),
+  type: c.type,
+  clientExtensionResults: c.getClientExtensionResults(),
+  authenticatorAttachment: c.authenticatorAttachment || undefined,
+  response: {
+    clientDataJSON: bufToB64u(c.response.clientDataJSON),
+    ...(c.response.attestationObject
+      ? {
+          attestationObject: bufToB64u(c.response.attestationObject),
+          transports: c.response.getTransports?.() || [],
+        }
+      : {
+          authenticatorData: bufToB64u(c.response.authenticatorData),
+          signature: bufToB64u(c.response.signature),
+          userHandle: c.response.userHandle ? bufToB64u(c.response.userHandle) : undefined,
+        }),
+  },
+});
+
+const hasWebAuthn = () => !!(window.PublicKeyCredential && navigator.credentials);
+
 $('#loginForm').onsubmit = async (e) => {
   e.preventDefault();
+  $('#gateErr').textContent = '';
   try {
-    await jf('/api/login', { method: 'POST', body: JSON.stringify({ code: $('#code').value }) });
+    await jf('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ name: $('#loginName').value, password: $('#loginPass').value }),
+    });
+    $('#loginPass').value = '';
     boot();
   } catch (err) { $('#gateErr').textContent = err.message; }
+};
+
+if (hasWebAuthn()) {
+  $('#passkeyRow').hidden = false;
+  $('#passkeyBtn').hidden = false;
+}
+
+$('#passkeyBtn').onclick = async () => {
+  $('#gateErr').textContent = '';
+  try {
+    const options = await jf('/api/login/passkey/options', { method: 'POST', body: '{}' });
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        ...options,
+        challenge: b64uToBuf(options.challenge),
+        allowCredentials: (options.allowCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+      },
+    });
+    if (!credential) return;
+    await jf('/api/login/passkey', {
+      method: 'POST',
+      body: JSON.stringify({ response: credToJSON(credential) }),
+    });
+    boot();
+  } catch (err) {
+    // A cancelled prompt is not an error worth shouting about.
+    if (err.name === 'NotAllowedError' || err.name === 'AbortError') return;
+    $('#gateErr').textContent = err.message;
+  }
 };
 
 $('#logout').onclick = async () => {
@@ -595,7 +698,76 @@ loaders.github = async () => {
   } catch (err) { el.innerHTML = `<p class="err">${esc(err.message)}</p>`; }
 };
 
-/* ---------- access: people, codes, devices, permissions ---------- */
+/* ---------- account: your own password and passkeys ---------- */
+
+loaders.account = async () => {
+  $('#pkAdd').hidden = !hasWebAuthn();
+  if (!hasWebAuthn()) {
+    $('#pkMsg').innerHTML = '<span class="muted">This browser does not support passkeys.</span>';
+  }
+  const keys = await jf('/api/passkeys');
+  $('#pkList').innerHTML = keys.map((k) => `<li>
+    <span class="grow"><b>${esc(k.label)}</b>
+      <div class="muted small">added ${ago(k.createdAt)}
+        · ${k.lastUsed ? 'last used ' + ago(k.lastUsed) : 'never used'}</div></span>
+    <button class="x" data-pk="${esc(k.id)}" title="Remove">✕</button></li>`).join('')
+    || '<p class="muted">No passkeys yet.</p>';
+  $$('#pkList [data-pk]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Remove this passkey?')) return;
+    try { await jf('/api/passkeys/' + encodeURIComponent(b.dataset.pk), { method: 'DELETE' }); loaders.account(); }
+    catch (err) { $('#pkMsg').innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+  }));
+};
+
+$('#pwForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const msg = $('#pwMsg');
+  msg.innerHTML = '';
+  if ($('#pwNext').value !== $('#pwConfirm').value) {
+    msg.innerHTML = '<span class="err">The two new passwords do not match.</span>';
+    return;
+  }
+  try {
+    await jf('/api/me/password', {
+      method: 'POST',
+      body: JSON.stringify({ current: $('#pwCurrent').value, next: $('#pwNext').value }),
+    });
+    $('#pwForm').reset();
+    msg.innerHTML = '<span style="color:var(--good)">Password updated.</span>';
+  } catch (err) { msg.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+};
+
+$('#pkAdd').onclick = async () => {
+  const msg = $('#pkMsg');
+  msg.innerHTML = '';
+  try {
+    const label = prompt('Name this passkey (e.g. "Phone", "Laptop")') || 'Passkey';
+    const options = await jf('/api/passkeys/options', { method: 'POST', body: '{}' });
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        ...options,
+        challenge: b64uToBuf(options.challenge),
+        user: { ...options.user, id: b64uToBuf(options.user.id) },
+        excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+      },
+    });
+    if (!credential) return;
+    await jf('/api/passkeys', {
+      method: 'POST',
+      body: JSON.stringify({ response: credToJSON(credential), label }),
+    });
+    msg.innerHTML = '<span style="color:var(--good)">Passkey added.</span>';
+    loaders.account();
+  } catch (err) {
+    if (err.name === 'NotAllowedError' || err.name === 'AbortError') return;
+    const hint = err.name === 'InvalidStateError'
+      ? 'That device already has a passkey for this site.'
+      : err.message;
+    msg.innerHTML = `<span class="err">${esc(hint)}</span>`;
+  }
+};
+
+/* ---------- access: people, passwords, devices, permissions ---------- */
 
 let ACCESS = { users: [], capabilities: {}, roles: {}, audit: [] };
 let editing = null; // the person being edited, or null when adding
@@ -614,7 +786,8 @@ loaders.access = async () => {
       <b>${esc(u.name)}</b> ${u.id === ME.user.id ? '<span class="muted small">— you</span>' : ''}
       <span class="tag ${u.role === 'admin' ? 'admin' : ''}">${u.permissions ? 'custom' : esc(u.role)}</span>
       ${u.disabled ? '<span class="tag off">suspended</span>' : ''}
-      <div class="muted small">${u.hasCode ? 'code set' : 'no code'}
+      <div class="muted small">${u.hasPassword ? 'password set' : 'no password'}
+        · ${u.passkeys.length ? u.passkeys.length + ' passkey(s)' : 'no passkeys'}
         · ${u.macs.length ? u.macs.length + ' device(s)' : 'no devices'}
         · ${u.caps.length} of ${Object.keys(ACCESS.capabilities).length} permissions
         · ${u.sessions.length ? u.sessions.length + ' active session(s)' : 'not signed in'}
@@ -645,8 +818,10 @@ function openUser(u) {
   $('#ufTitle').textContent = u ? 'Edit ' + u.name : 'Add person';
   $('#ufName').value = u?.name || '';
   $('#ufRole').value = u?.permissions ? 'custom' : (u?.role || 'guest');
-  $('#ufCode').value = '';
-  $('#ufCodeHint').textContent = u ? (u.hasCode ? '— leave blank to keep the current one' : '— none set') : '';
+  $('#ufPass').value = '';
+  $('#ufPassHint').textContent = u
+    ? (u.hasPassword ? '— leave blank to keep the current one' : '— none set')
+    : '';
   $('#ufMacs').value = (u?.macs || []).join(', ');
   $('#ufDisabled').checked = !!u?.disabled;
   $('#ufErr').textContent = '';
@@ -688,7 +863,7 @@ $('#userForm').onsubmit = async (e) => {
     macs: $('#ufMacs').value.split(',').map((s) => s.trim()).filter(Boolean),
     disabled: $('#ufDisabled').checked,
   };
-  if ($('#ufCode').value) body.code = $('#ufCode').value;
+  if ($('#ufPass').value) body.password = $('#ufPass').value;
   try {
     if (editing) await jf('/api/access/users/' + editing.id, { method: 'PATCH', body: JSON.stringify(body) });
     else await jf('/api/access/users', { method: 'POST', body: JSON.stringify(body) });

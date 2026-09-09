@@ -21,26 +21,37 @@ Nothing else is persisted, so `data/` is the entire backup surface.
 
 ## Authentication and authorisation
 
-People, codes, devices, permissions and sessions live in `data/auth.json`, managed from the
-**Access** panel in the app. `ACCESS_CODE` in `.env` is used once, to create the first admin
-on a cold start; after that it is ignored. Leave it blank and a random code is printed to the
-console on first run.
+People, passwords, passkeys, devices, permissions and sessions live in `data/auth.json`,
+managed from the **Access** panel (everyone else's) and the **Account** page (your own).
+`ACCESS_PASSWORD` in `.env` is used once, to create the first admin on a cold start; after
+that it is ignored. Leave it blank and a random password is printed to the console on first run.
 
 ### Getting in
 
-Two routes, both ending at the same session cookie, both identifying *which person* signed in:
+Three routes, all ending at the same session cookie, all identifying *which person* signed in:
 
-- **6-digit code** — stored only as a salted scrypt hash, compared in constant time.
+- **Name and password** — the password is stored only as a salted scrypt hash and compared in
+  constant time. A wrong name is checked against a dummy hash so it takes the same time and
+  returns the same message as a wrong password, revealing nothing about who exists. Minimum
+  10 characters, no composition rules — length is the only requirement that buys real entropy.
   Five failures from one IP start an escalating lockout (1 min, doubling, capped at an hour).
+- **Passkey** (WebAuthn) — fingerprint, face or device PIN, with nothing to type or leak.
+  Registered from the Account page; signing in needs no name, because the credential is
+  discoverable (`residentKey: required`) and the browser offers the right one for the site.
+  Verification uses `@simplewebauthn/server`; the signature counter is stored on every use, so
+  a cloned authenticator is detected. Requires HTTPS, or localhost for development.
 - **Device MAC** — the server resolves the caller's IP with `arp -a` and matches it against
   that person's registered devices. ARP only sees the local network segment, so this is a
-  convenience for your own LAN devices, not a security boundary; everyone else gets the code
-  prompt. The machine running the server has no MAC of its own, so it appears as
-  `00:00:00:00:00:00` — register that to sign in automatically on the host.
-  `MAC_LOGIN=false` turns this route off completely.
+  convenience for LAN devices, not a security boundary. `MAC_LOGIN=false` turns it off, which
+  is what the VPS does.
 
 Sessions last 7 days and survive restarts. Suspending or deleting someone ends theirs
-immediately.
+immediately. Changing your own password requires the current one, so a stolen session cannot
+lock the real owner out.
+
+**Passkeys are bound to the hostname.** The relying-party ID comes from `BASE_URL`, so a
+passkey registered against `localhost` will not work on `dash.dvergaram.is-local.org` and vice
+versa. Everyone keeps a password as well — an account is never allowed to end up with no way in.
 
 ### What people can do
 
@@ -58,6 +69,9 @@ cosmetic; the server checks every request regardless.**
 | `github:read` | repositories, PRs and activity |
 | `connections:manage` | connect and disconnect Google / Spotify |
 | `users:manage` | the Access panel itself |
+
+Managing your own password and passkeys needs no capability — those routes only ever touch
+the caller's own credentials.
 
 Three roles bundle these — **admin** (everything), **member** (everything but `users:manage`),
 **guest** (read-only) — and any person can instead be given an explicit custom set that
@@ -125,10 +139,14 @@ Spotify playback controls need Premium and an already-active device.
 | `GET /api/github` | repos, open PRs, recent activity |
 | `GET·POST·PATCH·DELETE /api/access[/users/:id]` | people, codes, devices, permissions |
 | `GET /api/access/device` | the caller's IP and resolved MAC |
+| `POST /api/me/password` | `{current, next}` — your own |
+| `GET·POST·DELETE /api/passkeys[/:id]` | your own passkeys |
+| `POST /api/login/passkey[/options]` | passwordless sign-in |
 
 `npm test` runs the self-check: filename and MAC validation, ARP parsing, scheduling maths,
-code hashing, role and capability resolution, and the store end to end (sessions, suspension,
-the last-admin guard, rollback on a rejected edit, persistence across restarts).
+password hashing, role and capability resolution, passkey storage, and the store end to end
+(sessions, suspension, the last-admin guard, rollback on a rejected edit, persistence across
+restarts, and migration from the old 6-digit codes).
 
 ## Deliberately left out
 
@@ -138,7 +156,10 @@ the last-admin guard, rollback on a rejected edit, persistence across restarts).
   permission to use it is per person. Per-person Google accounts would need a token per user.
 - Sign-in cost is O(people): scrypt runs once per person until the code matches. Fine below
   ~50 people; prefix codes with a person id if this ever hosts a crowd.
-- No password reset flow. An admin sets a new code from the Access panel.
+- No password reset flow. An admin sets a new one from the Access panel; with no admin left,
+  edit `data/auth.json` directly.
+- No second factor on top of a password. A passkey replaces the password rather than adding
+  to it — for a personal dashboard that is the right trade.
 - The MAC route is off on the VPS and only useful on a LAN — it is a convenience, never a
   security boundary.
 - Nothing was added to `vps/nginx/nginx.conf`: it is a parallel config with no running
