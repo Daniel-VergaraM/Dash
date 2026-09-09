@@ -106,7 +106,7 @@ async function apiRaw(name, pathq) {
   const res = await fetch(PROVIDERS[name].api + pathq, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw fail(res.status, detail.error?.message || `${name} returned ${res.status}`);
+    throw fail(res.status, upstreamError(name, res.status, detail, pathq));
   }
   return res;
 }
@@ -123,8 +123,22 @@ async function api(name, pathq, opts = {}) {
   });
   if (res.status === 204) return {};
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw fail(res.status, j.error?.message || j.error || `${name} returned ${res.status}`);
+  if (!res.ok) throw fail(res.status, upstreamError(name, res.status, j, pathq));
   return j;
+}
+
+// A bare "403" is useless for telling apart "the token predates this scope" from "Spotify
+// will not serve this object". The provider's own message plus the scopes the stored token
+// actually carries answers that without guesswork.
+function upstreamError(name, status, body, pathq) {
+  const said = body.error?.message || body.error_description || body.error || `returned ${status}`;
+  let msg = `${name}: ${said}`;
+  if (status === 403 || status === 401) {
+    const granted = tokens[name]?.scope;
+    msg += granted ? ` — token was granted: ${granted}` : ' — the stored token records no scopes';
+  }
+  console.error(`[${name}] ${status} on ${pathq.split('?')[0]} — ${said}`);
+  return msg;
 }
 
 /* ---------- identity ---------- */
