@@ -818,7 +818,10 @@ async function openList(id) {
       <span class="grow ellip">${esc(t.name)}
         <div class="muted small ellip">${esc(t.artists)}</div></span>
       <span class="muted small">${mmss(t.ms)}</span></li>`).join('')
-      || '<p class="muted">This playlist is empty.</p>';
+      || (pl.readable === false
+        ? '<p class="muted">Spotify only lets this app read playlists you own or collaborate on. '
+          + 'This one belongs to someone else, so its tracks are not available.</p>'
+        : '<p class="muted">This playlist is empty.</p>');
 
     if (!playable) return;
     $$('#trackList [data-uri]').forEach((li) => (li.onclick = async () => {

@@ -134,6 +134,12 @@ Drive opens on My Drive and browses folders in place, with a breadcrumb; the sea
 across everything instead. Files are shown in the pane beside the list, streamed from the
 server, so nothing redirects to Google.
 
+Playlist contents come from `/v1/playlists/{id}/items`. Spotify's February/March 2026 migration
+retired `/playlists/{id}/tracks` — it now returns **403 Forbidden** for apps in Development Mode
+— and renamed the wrapper field `track` to `item`. That same migration limits playlist contents
+to playlists you own or collaborate on: for anyone else's, Spotify returns the metadata with no
+`items` field, and the app says so rather than showing an empty list.
+
 ## API
 
 | | |

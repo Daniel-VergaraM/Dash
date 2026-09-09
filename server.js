@@ -673,15 +673,27 @@ app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
   }));
 }));
 
-// Only the tracks: the name, image and uri already came back with the playlist list, so
-// re-fetching /v1/playlists/{id} was a second call that could fail for no added value.
+// Spotify's February/March 2026 migration replaced /playlists/{id}/tracks with
+// /playlists/{id}/items and renamed the wrapper field `track` to `item`. The old path now
+// returns 403 for apps in Development Mode.
+//
+// The name, image and uri already came back with the playlist list, so this only fetches
+// the contents.
 app.get('/api/spotify/playlists/:id', can('music:read'), wrap(async (req) => {
   const id = encodeURIComponent(req.params.id);
-  const tracks = await api('spotify', `/v1/playlists/${id}/tracks?limit=100`);
+  const page = await api('spotify', `/v1/playlists/${id}/items?limit=100`);
+
+  // In Development Mode this endpoint only serves playlists the user owns or collaborates on.
+  // For anything else Spotify returns the metadata with no `items` field at all — which is a
+  // permission answer, not an empty playlist, and reads very differently to the person.
+  if (!page.items) return { id: req.params.id, tracks: [], readable: false };
+
   return {
     id: req.params.id,
-    // Local files and removed tracks come back as null, or without a uri to play.
-    tracks: (tracks.items || []).map((i) => i.track).filter((t) => t?.uri).map((t) => ({
+    readable: true,
+    // `item` is the new name; the old `track` is kept as a fallback while the rename lands.
+    // Local files and removed entries arrive null or without a uri to play.
+    tracks: page.items.map((i) => i.item ?? i.track).filter((t) => t?.uri).map((t) => ({
       uri: t.uri,
       name: t.name,
       artists: (t.artists || []).map((a) => a.name).join(', '),
