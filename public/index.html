@@ -782,12 +782,15 @@ const mmss = (ms) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
 
+let playlists = [];
+
 async function loadPlaylists() {
   try {
-    const lists = await jf('/api/spotify/playlists');
-    $('#plList').innerHTML = lists.map((p) => `<button data-pl="${esc(p.id)}" class="${p.id === openPlaylist ? 'on' : ''}">
+    playlists = await jf('/api/spotify/playlists');
+    $('#plList').innerHTML = playlists.map((p) => `<button data-pl="${esc(p.id)}" class="${p.id === openPlaylist ? 'on' : ''}">
       <img src="${esc(p.image)}" alt="">
-      <span class="grow ellip">${esc(p.name)}<div class="muted small">${p.tracks} tracks</div></span>
+      <span class="grow ellip">${esc(p.name)}<div class="muted small">${p.tracks} tracks${
+        p.owner ? ' · ' + esc(p.owner) : ''}</div></span>
     </button>`).join('') || '<p class="muted small">No playlists.</p>';
     $$('#plList [data-pl]').forEach((b) => (b.onclick = () => openList(b.dataset.pl)));
   } catch (err) {
@@ -800,11 +803,13 @@ async function loadPlaylists() {
 
 async function openList(id) {
   openPlaylist = id;
+  // Name and uri come from the list we already loaded, not from a second API call.
+  const known = playlists.find((p) => p.id === id) || {};
+  $('#plTitle').textContent = known.name || 'Playlist';
   $('#trackList').innerHTML = '<p class="muted">Loading…</p>';
   $$('#plList [data-pl]').forEach((b) => b.classList.toggle('on', b.dataset.pl === id));
   try {
-    const pl = await jf('/api/spotify/playlists/' + encodeURIComponent(id));
-    $('#plTitle').textContent = pl.name;
+    const pl = { ...known, ...(await jf('/api/spotify/playlists/' + encodeURIComponent(id))) };
     const playable = can('music:control');
     $('#trackList').innerHTML = pl.tracks.map((t, i) => `<li class="${playable ? 'play' : ''}"
         data-uri="${esc(t.uri)}" title="${playable ? 'Play' : ''}">

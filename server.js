@@ -673,22 +673,18 @@ app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
   }));
 }));
 
+// Only the tracks: the name, image and uri already came back with the playlist list, so
+// re-fetching /v1/playlists/{id} was a second call that could fail for no added value.
 app.get('/api/spotify/playlists/:id', can('music:read'), wrap(async (req) => {
   const id = encodeURIComponent(req.params.id);
-  const [playlist, tracks] = await Promise.all([
-    api('spotify', `/v1/playlists/${id}?fields=name,uri,owner(display_name),images`),
-    api('spotify', `/v1/playlists/${id}/tracks?limit=100&fields=items(track(id,uri,name,duration_ms,artists(name),album(name,images)))`),
-  ]);
+  const tracks = await api('spotify', `/v1/playlists/${id}/tracks?limit=100`);
   return {
     id: req.params.id,
-    uri: playlist.uri,
-    name: playlist.name,
-    image: playlist.images?.at(-1)?.url || '',
-    // Local files and removed tracks come back as null and have no uri to play.
+    // Local files and removed tracks come back as null, or without a uri to play.
     tracks: (tracks.items || []).map((i) => i.track).filter((t) => t?.uri).map((t) => ({
       uri: t.uri,
       name: t.name,
-      artists: t.artists.map((a) => a.name).join(', '),
+      artists: (t.artists || []).map((a) => a.name).join(', '),
       album: t.album?.name || '',
       image: t.album?.images?.at(-1)?.url || '',
       ms: t.duration_ms,
