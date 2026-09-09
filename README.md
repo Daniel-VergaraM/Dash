@@ -135,6 +135,7 @@ Spotify playback controls need Premium and an already-active device.
 | `DELETE /api/tasks/:id` | |
 | `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | markdown files |
 | `GET /api/drive?q=` | recent/searched files |
+| `GET /api/drive/:id/preview` | streams the file from our own origin |
 | `GET /api/spotify`, `POST /api/spotify/:play\|pause\|next\|previous` | |
 | `GET /api/github` | repos, open PRs, recent activity |
 | `GET·POST·PATCH·DELETE /api/access[/users/:id]` | people, codes, devices, permissions |
@@ -162,5 +163,11 @@ restarts, and migration from the old 6-digit codes).
   to it — for a personal dashboard that is the right trade.
 - The MAC route is off on the VPS and only useful on a LAN — it is a convenience, never a
   security boundary.
+- Drive previews stream through the server rather than embedding Google's `/preview` iframe:
+  that iframe authenticates with the viewer's own Google cookies, which are third-party inside
+  our page and blocked by default in current browsers, so it returned 401. Serving the bytes
+  ourselves also means a viewer with `drive:read` needs no Google account at all. Google Docs,
+  Sheets and Slides are exported to PDF; there is no `Range` support, so seeking inside a large
+  video re-fetches.
 - Nothing was added to `vps/nginx/nginx.conf`: it is a parallel config with no running
   container. If nginx ever becomes the live proxy, that block has to be written too.

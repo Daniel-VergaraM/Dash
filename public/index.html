@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dash</title>
+<!-- Inline so the browser never requests /favicon.ico, which would 404. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236ea8fe'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='20' font-weight='700' text-anchor='middle' fill='%230f1115'%3ED%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css">
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"></script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"></script>
@@ -229,8 +231,11 @@
       </div>
       <div class="card" style="margin-top:14px"><ul class="list" id="driveFiles"></ul></div>
       <div id="dvWrap"><div class="row" style="margin-bottom:6px"><b id="dvName"></b>
-        <button id="dvClose" style="margin-left:auto">Close preview</button></div>
-        <iframe id="dv" referrerpolicy="no-referrer"></iframe></div>
+        <a id="dvOpen" class="small" target="_blank" rel="noreferrer" style="margin-left:auto">open in Drive ↗</a>
+        <button id="dvClose">Close preview</button></div>
+        <iframe id="dv" referrerpolicy="no-referrer"></iframe>
+        <p class="muted small">Google Docs, Sheets and Slides are converted to PDF for this pane.
+          Formats the browser cannot display will download instead — use the Drive link above.</p></div>
     </section>
 
     <section class="view" data-view="music">
@@ -627,14 +632,17 @@ async function loadDrive() {
     const files = await jf('/api/drive?q=' + encodeURIComponent($('#driveQ').value));
     el.innerHTML = files.map((f) => `<li>
       <img src="${esc(f.iconLink || '')}" alt="">
-      <span class="grow ellip"><a href="#" data-id="${esc(f.id)}" data-name="${esc(f.name)}">${esc(f.name)}</a>
+      <span class="grow ellip"><a href="#" data-id="${esc(f.id)}" data-name="${esc(f.name)}" data-link="${esc(f.webViewLink)}">${esc(f.name)}</a>
         <div class="muted small">${esc(f.mimeType.split('.').pop())} · ${ago(f.modifiedTime)}</div></span>
       <a class="small" href="${esc(f.webViewLink)}" target="_blank" rel="noreferrer">drive ↗</a></li>`).join('')
       || '<p class="muted">No files.</p>';
     $$('#driveFiles a[data-id]').forEach((a) => (a.onclick = (e) => {
       e.preventDefault();
-      $('#dv').src = `https://drive.google.com/file/d/${a.dataset.id}/preview`;
+      // Same origin, served by us from the OAuth token — Google's own /preview iframe needs
+      // the viewer's Google cookies, which are third-party here and blocked.
+      $('#dv').src = '/api/drive/' + encodeURIComponent(a.dataset.id) + '/preview';
       $('#dvName').textContent = a.dataset.name;
+      $('#dvOpen').href = a.dataset.link || '#';
       $('#dvWrap').style.display = 'block';
     }));
   } catch (err) { el.innerHTML = connectBox('google', err); }

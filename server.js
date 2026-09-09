@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { noteName, macFromArp, taskWindow } from './lib.js';
 import {
@@ -82,17 +84,35 @@ async function exchange(name, body) {
   await saveTokens();
 }
 
-async function api(name, pathq, opts = {}) {
+// Refreshes if needed and hands back a usable token, so the raw and JSON callers share
+// exactly one place that knows about expiry.
+async function accessToken(name) {
   const t = tokens[name];
   if (!t) throw fail(428, `${name} not connected`);
   if (Date.now() > t.expires_at) {
     if (!t.refresh_token) throw fail(428, `${name} session expired — reconnect`);
     await exchange(name, { grant_type: 'refresh_token', refresh_token: t.refresh_token });
   }
+  return tokens[name].access_token;
+}
+
+// For bytes rather than JSON: returns the Response so the body can be streamed.
+async function apiRaw(name, pathq) {
+  const token = await accessToken(name);
+  const res = await fetch(PROVIDERS[name].api + pathq, { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw fail(res.status, detail.error?.message || `${name} returned ${res.status}`);
+  }
+  return res;
+}
+
+async function api(name, pathq, opts = {}) {
+  const token = await accessToken(name);
   const res = await fetch(PROVIDERS[name].api + pathq, {
     ...opts,
     headers: {
-      authorization: `Bearer ${tokens[name].access_token}`,
+      authorization: `Bearer ${token}`,
       'content-type': 'application/json',
       ...opts.headers,
     },
@@ -529,6 +549,40 @@ app.get('/api/drive', can('drive:read'), wrap(async (req) => {
     fields: 'files(id,name,mimeType,modifiedTime,webViewLink,iconLink,size)',
   });
   return (await api('google', `/drive/v3/files?${q}`)).files || [];
+}));
+
+// Google's own /preview iframe authenticates with the viewer's Google session cookies, which
+// are third-party inside our page and blocked by default in current browsers — hence the 401s.
+// Serving the bytes ourselves, with the OAuth token we already hold, makes the preview
+// same-origin and independent of whether the viewer is signed into Google at all.
+const GOOGLE_EXPORT = {
+  'application/vnd.google-apps.document': 'application/pdf',
+  'application/vnd.google-apps.spreadsheet': 'application/pdf',
+  'application/vnd.google-apps.presentation': 'application/pdf',
+  'application/vnd.google-apps.drawing': 'image/png',
+};
+
+app.get('/api/drive/:id/preview', can('drive:read'), wrap(async (req, res) => {
+  const id = encodeURIComponent(req.params.id);
+  const meta = await api('google', `/drive/v3/files/${id}?fields=name,mimeType`);
+
+  // Google-native docs have no bytes to download; they have to be exported to a real format.
+  const exportAs = GOOGLE_EXPORT[meta.mimeType];
+  const upstream = exportAs
+    ? await apiRaw('google', `/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(exportAs)}`)
+    : await apiRaw('google', `/drive/v3/files/${id}?alt=media`);
+
+  res.setHeader('content-type', exportAs || meta.mimeType || 'application/octet-stream');
+  // inline, never attachment: this is a preview pane, not a download. The filename is quoted
+  // and stripped of quotes and newlines so it cannot break out of the header.
+  const safeName = String(meta.name || 'file').replace(/["\r\n]/g, '');
+  res.setHeader('content-disposition', `inline; filename="${safeName}"`);
+  const len = upstream.headers.get('content-length');
+  if (len) res.setHeader('content-length', len);
+
+  // ponytail: streams straight through, no Range support — seeking inside a large video
+  // will re-fetch. Add Range passthrough if that ever matters.
+  await pipeline(Readable.fromWeb(upstream.body), res);
 }));
 
 /* ---------- Notes (markdown + latex, plain files on disk) ---------- */
