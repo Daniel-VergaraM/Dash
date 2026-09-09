@@ -1,0 +1,45 @@
+# Dash runs as its own compose project on the VPS, like pdf-reader — it is not part of
+# the vps/ stack. Caddy (dv-site-proxy) reaches it at 172.17.0.1:3000, matching the
+# `dash.dvergaram.is-local.org` block in vps/caddy/Caddyfile.
+#
+#   docker compose up -d --build
+#
+# The published port is bound to the Docker bridge address only, so :3000 is NOT reachable
+# from the internet — every request has to come through Caddy. (pdf-reader publishes
+# 0.0.0.0:2077, which leaves that one open on the public IP; worth tightening the same way.)
+
+services:
+  dash:
+    build: .
+    container_name: dash
+    restart: unless-stopped
+    ports:
+      - "172.17.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Caddy connects from a Docker bridge address, so loopback is not enough here: without
+      # this every visitor would arrive as the proxy's IP — one shared rate-limit bucket, and
+      # no way to tell callers apart. The header is only trusted from these private ranges.
+      TRUST_PROXY: "loopback, uniquelocal"
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      BASE_URL: "https://dash.dvergaram.is-local.org"
+      # ARP cannot see clients arriving over the internet, so the device route is dead weight
+      # on a public host — codes only.
+      MAC_LOGIN: "false"
+    volumes:
+      - dash_data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/me || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: "256m"
+    cpus: "0.25"
+
+volumes:
+  # auth.json (people, codes, permissions), tokens.json (Google/Spotify) and the notes.
+  dash_data:
+    driver: local

@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dash</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+    --fg: #e6e8ee; --dim: #939aab; --accent: #6ea8fe; --good: #5ed39a; --bad: #ff7b72;
+  }
+  * { box-sizing: border-box; }
+  /* Capability-hidden elements: must beat the display:flex/grid rules below. */
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 11px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0f1115; border-color: var(--accent); font-weight: 600; }
+  input, textarea, select { background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 9px; }
+  input:focus, textarea:focus { outline: 1px solid var(--accent); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* login */
+  #gate { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 20; }
+  #gate form { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 28px; width: 320px; text-align: center; }
+  #gate h1 { margin: 0 0 4px; font-size: 20px; }
+  #gate p { color: var(--dim); margin: 0 0 18px; font-size: 13px; }
+  #code { width: 100%; text-align: center; letter-spacing: 10px; font-size: 22px; padding: 12px; }
+  #gate button { width: 100%; margin-top: 12px; }
+  #gateErr { color: var(--bad); min-height: 20px; font-size: 13px; margin-top: 8px; }
+
+  /* shell */
+  #app { display: none; grid-template-columns: 190px 1fr; height: 100vh; }
+  nav { background: var(--panel); border-right: 1px solid var(--line); padding: 14px 10px;
+    display: flex; flex-direction: column; gap: 3px; }
+  nav .brand { font-weight: 700; padding: 4px 10px 14px; letter-spacing: .5px; }
+  nav button { background: none; border: none; text-align: left; padding: 9px 11px; border-radius: 8px; color: var(--dim); }
+  nav button:hover { background: var(--panel2); color: var(--fg); }
+  nav button.on { background: var(--panel2); color: var(--fg); font-weight: 600; }
+  nav .spacer { flex: 1; }
+  nav .conn { font-size: 12px; color: var(--dim); padding: 3px 11px; }
+  nav .conn b { color: var(--good); font-weight: 600; }
+  main { overflow: auto; padding: 22px 26px; }
+  .view { display: none; }
+  .view.on { display: block; }
+  h2 { margin: 0 0 16px; font-size: 18px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: .6px; }
+  .muted { color: var(--dim); }
+  .small { font-size: 12px; }
+  ul.list { list-style: none; margin: 0; padding: 0; }
+  ul.list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  ul.list li:last-child { border-bottom: none; }
+  .grow { flex: 1; min-width: 0; }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .done { text-decoration: line-through; color: var(--dim); }
+  .x { background: none; border: none; color: var(--dim); padding: 0 4px; }
+  .x:hover { color: var(--bad); }
+  .daygroup { margin-bottom: 18px; }
+  .daygroup > h4 { margin: 0 0 6px; font-size: 12px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .6px; }
+  .err { color: var(--bad); }
+  .connect { padding: 30px; text-align: center; }
+
+  /* notes */
+  #notesWrap { display: grid; grid-template-columns: 210px 1fr 1fr; gap: 14px; height: calc(100vh - 110px); }
+  #noteList { overflow: auto; }
+  #noteList button { display: block; width: 100%; text-align: left; background: none; border: none;
+    padding: 7px 9px; border-radius: 7px; color: var(--dim); }
+  #noteList button.on, #noteList button:hover { background: var(--panel2); color: var(--fg); }
+  #editor { width: 100%; height: 100%; resize: none; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    line-height: 1.6; }
+  #preview { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 20px; overflow: auto; }
+  #preview img { max-width: 100%; }
+  #preview pre { background: var(--panel2); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  #preview code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  #preview table { border-collapse: collapse; }
+  #preview th, #preview td { border: 1px solid var(--line); padding: 5px 9px; }
+  #preview blockquote { border-left: 3px solid var(--line); margin: 0; padding-left: 12px; color: var(--dim); }
+
+  /* drive */
+  #driveFiles li img { width: 16px; height: 16px; }
+  #dvWrap { display: none; margin-top: 14px; }
+  #dvWrap iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+
+  /* access */
+  nav .who { font-size: 12px; padding: 6px 11px; border-top: 1px solid var(--line); margin-bottom: 4px; }
+  nav .who b { display: block; color: var(--fg); font-size: 13px; }
+  .person { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .person:last-of-type { border-bottom: none; }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--panel2); display: grid;
+    place-items: center; font-weight: 700; color: var(--accent); flex: none; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 20px; border: 1px solid var(--line); color: var(--dim); }
+  .tag.admin { color: var(--accent); border-color: var(--accent); }
+  .tag.off { color: var(--bad); border-color: var(--bad); }
+  button.danger { color: var(--bad); border-color: var(--line); }
+  button.danger:hover { border-color: var(--bad); }
+  #modal { display: none; position: fixed; inset: 0; background: #000a; z-index: 30; place-items: center; }
+  #modal.on { display: grid; }
+  #userForm { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px;
+    width: min(480px, 92vw); max-height: 90vh; overflow: auto; }
+  #userForm h3 { margin: 0 0 14px; }
+  #userForm label { display: block; margin-bottom: 12px; font-size: 13px; color: var(--dim); }
+  #userForm label input:not([type=checkbox]), #userForm label select { display: block; width: 100%; margin-top: 5px; }
+  #userForm label.rowlabel { display: flex; gap: 8px; align-items: center; }
+  #ufCaps { display: none; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 12px;
+    border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
+  #ufCaps.on { display: grid; }
+  #ufCaps label { display: flex; gap: 7px; align-items: flex-start; margin: 0; font-size: 12px; }
+
+  /* spotify */
+  #np { display: flex; gap: 16px; align-items: center; }
+  #np img { width: 88px; height: 88px; border-radius: 8px; }
+  @media (max-width: 800px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    nav { flex-direction: row; overflow-x: auto; }
+    nav .brand, nav .conn, nav .spacer { display: none; }
+    #notesWrap { grid-template-columns: 1fr; height: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <form id="loginForm">
+    <h1>Dash</h1>
+    <p>Enter your 6-digit access code</p>
+    <input id="code" inputmode="numeric" maxlength="6" autocomplete="off" autofocus>
+    <button class="primary" type="submit">Unlock</button>
+    <div id="gateErr"></div>
+  </form>
+</div>
+
+<div id="app">
+  <nav>
+    <div class="brand">DASH</div>
+    <button data-view="today" class="on">Today</button>
+    <button data-view="calendar" data-cap="calendar:read">Calendar</button>
+    <button data-view="notes" data-cap="notes:read">Notes</button>
+    <button data-view="drive" data-cap="drive:read">Drive</button>
+    <button data-view="music" data-cap="music:read">Music</button>
+    <button data-view="github" data-cap="github:read">GitHub</button>
+    <button data-view="access" data-cap="users:manage">Access</button>
+    <div class="spacer"></div>
+    <div class="who" id="who"></div>
+    <div class="conn" id="conn"></div>
+    <button id="logout">Sign out</button>
+  </nav>
+
+  <main>
+    <section class="view on" data-view="today">
+      <h2>Today</h2>
+      <div class="grid">
+        <div class="card" data-cap="tasks:read|tasks:write">
+          <h3>Schedule a task</h3>
+          <div class="row" style="gap:6px" data-cap="tasks:write">
+            <input id="tTitle" placeholder="What needs doing?" class="grow" style="min-width:160px">
+            <input id="tWhen" type="datetime-local">
+            <input id="tMins" type="number" value="30" min="5" step="5" style="width:72px" title="minutes">
+            <button class="primary" id="tAdd">Add</button>
+          </div>
+          <div id="tErr" class="err small" style="margin-top:6px"></div>
+          <ul class="list" id="taskList" style="margin-top:12px"></ul>
+        </div>
+        <div class="card" data-cap="calendar:read">
+          <h3>Next up</h3>
+          <div id="agendaToday"></div>
+        </div>
+        <div class="card" data-cap="music:read">
+          <h3>Now playing</h3>
+          <div id="npMini"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" data-view="calendar">
+      <h2>Calendar
+        <select id="calDays" style="margin-left:10px">
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+        </select>
+      </h2>
+      <div id="agenda"></div>
+    </section>
+
+    <section class="view" data-view="notes">
+      <h2>Notes <span class="muted small">markdown + $\LaTeX$ &mdash; Ctrl+S saves</span></h2>
+      <div id="notesWrap">
+        <div>
+          <button class="primary" id="newNote" style="width:100%;margin-bottom:8px" data-cap="notes:write">+ New note</button>
+          <div id="noteList"></div>
+        </div>
+        <textarea id="editor" placeholder="# Title&#10;&#10;Inline math $e^{i\pi}+1=0$, or display:&#10;&#10;$$\int_0^\infty e^{-x^2}dx = \frac{\sqrt\pi}{2}$$"></textarea>
+        <div id="preview"></div>
+      </div>
+      <div class="row small muted" style="margin-top:8px">
+        <span id="noteStatus"></span>
+        <button id="delNote" style="margin-left:auto" data-cap="notes:write">Delete note</button>
+      </div>
+    </section>
+
+    <section class="view" data-view="drive">
+      <h2>Drive</h2>
+      <div class="row">
+        <input id="driveQ" placeholder="Search files…" class="grow">
+        <button id="driveGo">Search</button>
+      </div>
+      <div class="card" style="margin-top:14px"><ul class="list" id="driveFiles"></ul></div>
+      <div id="dvWrap"><div class="row" style="margin-bottom:6px"><b id="dvName"></b>
+        <button id="dvClose" style="margin-left:auto">Close preview</button></div>
+        <iframe id="dv" referrerpolicy="no-referrer"></iframe></div>
+    </section>
+
+    <section class="view" data-view="music">
+      <h2>Music</h2>
+      <div class="card"><div id="np"></div>
+        <div class="row" style="margin-top:14px" data-cap="music:control">
+          <button data-cmd="previous">⏮</button>
+          <button data-cmd="play">▶</button>
+          <button data-cmd="pause">⏸</button>
+          <button data-cmd="next">⏭</button>
+          <span id="spErr" class="err small"></span>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px"><h3>Recently played</h3><ul class="list" id="recent"></ul></div>
+    </section>
+
+    <section class="view" data-view="github">
+      <h2>GitHub</h2>
+      <div class="grid" id="ghWrap"></div>
+    </section>
+
+    <section class="view" data-view="access">
+      <h2>Access</h2>
+      <div class="card">
+        <h3>People</h3>
+        <div id="userRows"></div>
+        <button class="primary" id="addUser" style="margin-top:12px">+ Add person</button>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>This device</h3>
+        <div id="thisDevice" class="muted"></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Recent sign-in activity</h3>
+        <ul class="list" id="auditList"></ul>
+      </div>
+    </section>
+
+    <div id="modal">
+      <form id="userForm">
+        <h3 id="ufTitle">Person</h3>
+        <label>Name<input id="ufName" maxlength="40" required></label>
+        <label>Role
+          <select id="ufRole">
+            <option value="admin">Admin — everything, including this panel</option>
+            <option value="member">Member — everything except this panel</option>
+            <option value="guest">Guest — read-only</option>
+            <option value="custom">Custom — pick capabilities below</option>
+          </select>
+        </label>
+        <label>6-digit code <span class="muted small" id="ufCodeHint"></span>
+          <input id="ufCode" inputmode="numeric" maxlength="6" placeholder="------" autocomplete="off">
+        </label>
+        <label>Device MACs <span class="muted small">comma separated — these sign in without a code</span>
+          <input id="ufMacs" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off">
+        </label>
+        <div id="ufCaps"></div>
+        <label class="rowlabel"><input type="checkbox" id="ufDisabled"> Suspended (blocks sign-in, ends sessions)</label>
+        <div class="err small" id="ufErr"></div>
+        <div class="row" style="margin-top:14px">
+          <button type="submit" class="primary">Save</button>
+          <button type="button" id="ufCancel">Cancel</button>
+          <button type="button" id="ufDelete" class="danger" style="margin-left:auto">Delete</button>
+        </div>
+      </form>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+async function jf(url, opts) {
+  const res = await fetch(url, {
+    ...opts,
+    headers: opts?.body ? { 'content-type': 'application/json' } : undefined,
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(j.error || res.statusText), { status: res.status });
+  return j;
+}
+
+let ME = { caps: [] };
+const can = (c) => ME.caps.includes(c);
+
+// A 428 means "provider not connected" — offer the fix only to whoever is allowed to apply it.
+function connectBox(provider, err) {
+  if (err.status === 428 && (provider === 'google' || provider === 'spotify')) {
+    return can('connections:manage')
+      ? `<div class="connect"><p class="muted">${esc(err.message)}</p>
+          <a href="/auth/${provider}"><button class="primary">Connect ${provider}</button></a></div>`
+      : `<div class="connect"><p class="muted">${esc(err.message)} — ask an admin to connect it.</p></div>`;
+  }
+  return `<p class="err">${esc(err.message)}</p>`;
+}
+
+const fmtTime = (iso, allDay) => allDay ? 'all day'
+  : new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+const ago = (iso) => {
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (m < 60) return m + 'm ago';
+  if (m < 1440) return Math.round(m / 60) + 'h ago';
+  return Math.round(m / 1440) + 'd ago';
+};
+
+/* ---------- auth ---------- */
+
+$('#loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await jf('/api/login', { method: 'POST', body: JSON.stringify({ code: $('#code').value }) });
+    boot();
+  } catch (err) { $('#gateErr').textContent = err.message; }
+};
+
+$('#logout').onclick = async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  location.reload();
+};
+
+async function boot() {
+  ME = await jf('/api/me');
+  if (!ME.auth) { ME.caps = []; $('#gate').style.display = 'grid'; return; }
+  $('#gate').style.display = 'none';
+  $('#app').style.display = 'grid';
+
+  // One mechanism for the whole UI: anything tagged with a capability it lacks is hidden.
+  // The server enforces the same rules — this only keeps dead controls off the screen.
+  $$('[data-cap]').forEach((el) => { el.hidden = !el.dataset.cap.split('|').some(can); });
+
+  $('#who').innerHTML = `<b>${esc(ME.user.name)}</b>
+    <span class="tag ${ME.user.role === 'admin' ? 'admin' : ''}">${esc(ME.user.role)}</span>
+    <span class="muted"> · via ${esc(ME.via || 'code')}</span>`;
+  $('#conn').innerHTML = Object.entries(ME.connected || {})
+    .map(([k, v]) => v ? `<div><b>●</b> ${k}</div>`
+      : `<div>○ ${can('connections:manage') && k !== 'github' ? `<a href="/auth/${k}">${k}</a>` : k}</div>`).join('');
+
+  const first = $$('nav button[data-view]').find((b) => !b.hidden);
+  show(first ? first.dataset.view : 'today');
+}
+
+/* ---------- nav ---------- */
+
+const loaders = {};
+function show(name) {
+  $$('nav button[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === name));
+  $$('.view').forEach((v) => v.classList.toggle('on', v.dataset.view === name));
+  loaders[name]?.();
+}
+$$('nav button[data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
+
+/* ---------- tasks + calendar ---------- */
+
+function agendaHtml(items) {
+  if (!items.length) return '<p class="muted">Nothing scheduled.</p>';
+  const days = {};
+  for (const e of items) (days[fmtDay(e.start)] ||= []).push(e);
+  return Object.entries(days).map(([day, evs]) => `<div class="daygroup"><h4>${esc(day)}</h4>
+    <ul class="list">${evs.map((e) => `<li>
+      <span class="muted small" style="width:74px;flex:none">${fmtTime(e.start, e.allDay)}</span>
+      <span class="grow ${e.done ? 'done' : ''}">${esc(e.title)}
+        ${e.task ? '<span class="muted small">· task</span>' : ''}
+        ${e.location ? `<div class="muted small">${esc(e.location)}</div>` : ''}</span>
+      ${e.link ? `<a class="small" href="${esc(e.link)}" target="_blank" rel="noreferrer">open</a>` : ''}
+    </li>`).join('')}</ul></div>`).join('');
+}
+
+async function loadTasks() {
+  try {
+    const items = await jf('/api/events?days=30&tasks=1');
+    $('#taskList').innerHTML = items.length ? items.map((t) => `<li>
+      <input type="checkbox" data-id="${esc(t.id)}" ${t.done ? 'checked' : ''}>
+      <span class="grow ${t.done ? 'done' : ''}">${esc(t.title)}
+        <div class="muted small">${esc(fmtDay(t.start))} · ${fmtTime(t.start, t.allDay)}</div></span>
+      <button class="x" data-del="${esc(t.id)}">✕</button></li>`).join('')
+      : '<p class="muted">No tasks yet.</p>';
+    $$('#taskList input[type=checkbox]').forEach((c) => (c.onchange = async () => {
+      await jf('/api/tasks/' + encodeURIComponent(c.dataset.id),
+        { method: 'PATCH', body: JSON.stringify({ done: c.checked }) });
+      loadTasks();
+    }));
+    $$('#taskList [data-del]').forEach((b) => (b.onclick = async () => {
+      await jf('/api/tasks/' + encodeURIComponent(b.dataset.del), { method: 'DELETE' });
+      loadTasks();
+    }));
+  } catch (err) { $('#taskList').innerHTML = connectBox('google', err); }
+}
+
+$('#tAdd').onclick = async () => {
+  $('#tErr').textContent = '';
+  try {
+    await jf('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({
+        title: $('#tTitle').value,
+        start: $('#tWhen').value || new Date().toISOString(),
+        minutes: $('#tMins').value,
+      }),
+    });
+    $('#tTitle').value = '';
+    loadTasks(); loadAgenda('#agendaToday', 2);
+  } catch (err) { $('#tErr').textContent = err.message; }
+};
+$('#tTitle').addEventListener('keydown', (e) => e.key === 'Enter' && $('#tAdd').click());
+
+async function loadAgenda(sel, days) {
+  const el = $(sel);
+  el.innerHTML = '<p class="muted">Loading…</p>';
+  try { el.innerHTML = agendaHtml(await jf('/api/events?days=' + days)); }
+  catch (err) { el.innerHTML = connectBox('google', err); }
+}
+
+loaders.today = () => { loadTasks(); loadAgenda('#agendaToday', 2); loadNowPlaying('#npMini', true); };
+loaders.calendar = () => loadAgenda('#agenda', $('#calDays').value);
+$('#calDays').onchange = () => loaders.calendar();
+
+// Default the scheduler to the next round half-hour, in local time.
+{
+  const d = new Date(Math.ceil(Date.now() / 18e5) * 18e5);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  $('#tWhen').value = d.toISOString().slice(0, 16);
+}
+
+/* ---------- notes ---------- */
+
+let currentNote = null;
+const renderNote = () => {
+  $('#preview').innerHTML = DOMPurify.sanitize(marked.parse($('#editor').value || ''));
+  renderMathInElement($('#preview'), {
+    delimiters: [
+      { left: '$$', right: '$$', display: true },
+      { left: '\\[', right: '\\]', display: true },
+      { left: '$', right: '$', display: false },
+      { left: '\\(', right: '\\)', display: false },
+    ],
+    throwOnError: false,
+  });
+};
+
+let debounce;
+$('#editor').oninput = () => { clearTimeout(debounce); debounce = setTimeout(renderNote, 200); };
+
+async function listNotes() {
+  const notes = await jf('/api/notes');
+  $('#noteList').innerHTML = notes.map((n) =>
+    `<button data-n="${esc(n.name)}" class="${n.name === currentNote ? 'on' : ''}">${esc(n.name.replace(/\.md$/, ''))}</button>`).join('')
+    || '<p class="muted small">No notes yet.</p>';
+  $$('#noteList button').forEach((b) => (b.onclick = () => openNote(b.dataset.n)));
+}
+
+async function openNote(name) {
+  const n = await jf('/api/notes/' + encodeURIComponent(name));
+  currentNote = n.name;
+  $('#editor').value = n.body;
+  $('#noteStatus').textContent = n.name;
+  renderNote(); listNotes();
+}
+
+async function saveNote() {
+  if (!currentNote) return;
+  await jf('/api/notes/' + encodeURIComponent(currentNote),
+    { method: 'PUT', body: JSON.stringify({ body: $('#editor').value }) });
+  $('#noteStatus').textContent = currentNote + ' · saved ' + new Date().toLocaleTimeString();
+  listNotes();
+}
+
+$('#newNote').onclick = async () => {
+  const raw = prompt('Note name');
+  if (!raw) return;
+  const name = raw.endsWith('.md') ? raw : raw + '.md';
+  try {
+    await jf('/api/notes/' + encodeURIComponent(name),
+      { method: 'PUT', body: JSON.stringify({ body: '# ' + raw.replace(/\.md$/, '') + '\n\n' }) });
+    openNote(name);
+  } catch (err) { alert(err.message); }
+};
+
+$('#delNote').onclick = async () => {
+  if (!currentNote || !confirm('Delete ' + currentNote + '?')) return;
+  await jf('/api/notes/' + encodeURIComponent(currentNote), { method: 'DELETE' });
+  currentNote = null; $('#editor').value = ''; renderNote(); listNotes();
+};
+
+addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveNote(); }
+});
+loaders.notes = listNotes;
+
+/* ---------- drive ---------- */
+
+async function loadDrive() {
+  const el = $('#driveFiles');
+  el.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const files = await jf('/api/drive?q=' + encodeURIComponent($('#driveQ').value));
+    el.innerHTML = files.map((f) => `<li>
+      <img src="${esc(f.iconLink || '')}" alt="">
+      <span class="grow ellip"><a href="#" data-id="${esc(f.id)}" data-name="${esc(f.name)}">${esc(f.name)}</a>
+        <div class="muted small">${esc(f.mimeType.split('.').pop())} · ${ago(f.modifiedTime)}</div></span>
+      <a class="small" href="${esc(f.webViewLink)}" target="_blank" rel="noreferrer">drive ↗</a></li>`).join('')
+      || '<p class="muted">No files.</p>';
+    $$('#driveFiles a[data-id]').forEach((a) => (a.onclick = (e) => {
+      e.preventDefault();
+      $('#dv').src = `https://drive.google.com/file/d/${a.dataset.id}/preview`;
+      $('#dvName').textContent = a.dataset.name;
+      $('#dvWrap').style.display = 'block';
+    }));
+  } catch (err) { el.innerHTML = connectBox('google', err); }
+}
+$('#driveGo').onclick = loadDrive;
+$('#driveQ').addEventListener('keydown', (e) => e.key === 'Enter' && loadDrive());
+$('#dvClose').onclick = () => { $('#dvWrap').style.display = 'none'; $('#dv').src = ''; };
+loaders.drive = loadDrive;
+
+/* ---------- spotify ---------- */
+
+async function loadNowPlaying(sel, miniOnly) {
+  const el = $(sel);
+  try {
+    const d = await jf('/api/spotify');
+    const t = d.now?.item;
+    el.innerHTML = t ? `
+      <img src="${esc(t.album.images.at(-1)?.url || '')}" alt="">
+      <div class="grow"><b>${esc(t.name)}</b>
+        <div class="muted">${esc(t.artists.map((a) => a.name).join(', '))}</div>
+        <div class="muted small">${esc(t.album.name)} · ${d.now.is_playing ? 'playing' : 'paused'}</div></div>`
+      : '<p class="muted">Nothing playing.</p>';
+    if (!miniOnly) {
+      $('#recent').innerHTML = d.recent.map((r) => `<li><span class="grow ellip">${esc(r.track.name)}
+        <span class="muted">— ${esc(r.track.artists[0]?.name || '')}</span></span>
+        <span class="muted small">${ago(r.played_at)}</span></li>`).join('')
+        || '<p class="muted">Nothing recent.</p>';
+    }
+  } catch (err) { el.innerHTML = connectBox('spotify', err); }
+}
+$$('[data-cmd]').forEach((b) => (b.onclick = async () => {
+  $('#spErr').textContent = '';
+  try {
+    await jf('/api/spotify/' + b.dataset.cmd, { method: 'POST' });
+    setTimeout(() => loadNowPlaying('#np'), 400);
+  } catch (err) { $('#spErr').textContent = err.message + ' (playback control needs Premium + an active device)'; }
+}));
+loaders.music = () => loadNowPlaying('#np');
+
+/* ---------- github ---------- */
+
+loaders.github = async () => {
+  const el = $('#ghWrap');
+  el.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const d = await jf('/api/github');
+    el.innerHTML = `
+      <div class="card"><h3>Repositories</h3><ul class="list">${d.repos.map((r) => `<li>
+        <span class="grow"><a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.name)}</a>
+          ${r.private ? '<span class="muted small"> · private</span>' : ''}
+          <div class="muted small ellip">${esc(r.desc || '')}</div></span>
+        <span class="muted small">${ago(r.pushed)}</span></li>`).join('')}</ul></div>
+      <div class="card"><h3>Open pull requests</h3><ul class="list">${d.prs.map((p) => `<li>
+        <span class="grow"><a href="${esc(p.url)}" target="_blank" rel="noreferrer">${esc(p.title)}</a>
+          <div class="muted small">${esc(p.repo)}</div></span>
+        <span class="muted small">${ago(p.at)}</span></li>`).join('') || '<p class="muted">None open.</p>'}</ul></div>
+      <div class="card"><h3>Recent activity</h3><ul class="list">${d.events.map((e) => `<li>
+        <span class="grow"><b class="small">${esc(e.type)}</b> ${esc(e.repo)}
+          <div class="muted small ellip">${esc(e.detail)}</div></span>
+        <span class="muted small">${ago(e.at)}</span></li>`).join('')}</ul></div>`;
+  } catch (err) { el.innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+};
+
+/* ---------- access: people, codes, devices, permissions ---------- */
+
+let ACCESS = { users: [], capabilities: {}, roles: {}, audit: [] };
+let editing = null; // the person being edited, or null when adding
+
+const AUDIT_LABEL = {
+  signin: 'signed in', 'signin-failed': 'failed sign-in', 'user-created': 'person added',
+  'user-updated': 'person updated', 'user-deleted': 'person removed',
+  'provider-connected': 'connected', 'provider-disconnected': 'disconnected',
+};
+
+loaders.access = async () => {
+  ACCESS = await jf('/api/access');
+  $('#userRows').innerHTML = ACCESS.users.map((u) => `<div class="person">
+    <div class="avatar">${esc(u.name[0].toUpperCase())}</div>
+    <div class="grow">
+      <b>${esc(u.name)}</b> ${u.id === ME.user.id ? '<span class="muted small">— you</span>' : ''}
+      <span class="tag ${u.role === 'admin' ? 'admin' : ''}">${u.permissions ? 'custom' : esc(u.role)}</span>
+      ${u.disabled ? '<span class="tag off">suspended</span>' : ''}
+      <div class="muted small">${u.hasCode ? 'code set' : 'no code'}
+        · ${u.macs.length ? u.macs.length + ' device(s)' : 'no devices'}
+        · ${u.caps.length} of ${Object.keys(ACCESS.capabilities).length} permissions
+        · ${u.sessions.length ? u.sessions.length + ' active session(s)' : 'not signed in'}
+        ${u.lastSeen ? '· last seen ' + ago(u.lastSeen) : ''}</div>
+    </div>
+    <button data-edit="${esc(u.id)}">Edit</button>
+  </div>`).join('');
+  $$('#userRows [data-edit]').forEach((b) =>
+    (b.onclick = () => openUser(ACCESS.users.find((u) => u.id === b.dataset.edit))));
+
+  const dev = await jf('/api/access/device');
+  $('#thisDevice').innerHTML = `IP <b>${esc(dev.ip || 'localhost')}</b> · MAC <b>${esc(dev.mac || 'not resolvable')}</b>`
+    + (dev.local
+      ? `<div class="small">This is the machine running the server, so it has no MAC of its own — ${esc(dev.mac)} stands in for it.</div>`
+      : dev.mac ? '' : '<div class="small">Only devices on the same network segment can be identified by MAC.</div>');
+
+  $('#auditList').innerHTML = ACCESS.audit.map((a) => `<li>
+    <span class="grow">${esc(AUDIT_LABEL[a.event] || a.event)}
+      <span class="muted">${esc(a.name || a.by || a.provider || '')}</span>
+      ${a.via ? `<span class="muted small"> · via ${esc(a.via)}</span>` : ''}
+      ${a.ip ? `<span class="muted small"> · ${esc(a.ip)}</span>` : ''}</span>
+    <span class="muted small">${ago(a.at)}</span></li>`).join('')
+    || '<p class="muted">Nothing logged yet.</p>';
+};
+
+function openUser(u) {
+  editing = u || null;
+  $('#ufTitle').textContent = u ? 'Edit ' + u.name : 'Add person';
+  $('#ufName').value = u?.name || '';
+  $('#ufRole').value = u?.permissions ? 'custom' : (u?.role || 'guest');
+  $('#ufCode').value = '';
+  $('#ufCodeHint').textContent = u ? (u.hasCode ? '— leave blank to keep the current one' : '— none set') : '';
+  $('#ufMacs').value = (u?.macs || []).join(', ');
+  $('#ufDisabled').checked = !!u?.disabled;
+  $('#ufErr').textContent = '';
+  $('#ufDelete').hidden = !u || u.id === ME.user.id;
+
+  const held = new Set(u?.permissions || ACCESS.roles[u?.role || 'guest'] || []);
+  $('#ufCaps').innerHTML = Object.entries(ACCESS.capabilities).map(([cap, desc]) =>
+    `<label><input type="checkbox" value="${esc(cap)}" ${held.has(cap) ? 'checked' : ''}>
+      <span>${esc(desc)}<br><span class="muted">${esc(cap)}</span></span></label>`).join('');
+  syncCaps();
+  $('#modal').classList.add('on');
+  $('#ufName').focus();
+}
+
+// The grid is editable only under the custom role; otherwise it previews what the role grants.
+function syncCaps() {
+  const custom = $('#ufRole').value === 'custom';
+  $('#ufCaps').classList.add('on');
+  $$('#ufCaps input').forEach((i) => (i.disabled = !custom));
+  if (!custom) {
+    const held = new Set(ACCESS.roles[$('#ufRole').value] || []);
+    $$('#ufCaps input').forEach((i) => (i.checked = held.has(i.value)));
+  }
+}
+$('#ufRole').onchange = syncCaps;
+
+$('#addUser').onclick = () => openUser(null);
+$('#ufCancel').onclick = () => $('#modal').classList.remove('on');
+$('#modal').onclick = (e) => { if (e.target.id === 'modal') $('#modal').classList.remove('on'); };
+
+$('#userForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('#ufErr').textContent = '';
+  const custom = $('#ufRole').value === 'custom';
+  const body = {
+    name: $('#ufName').value,
+    role: custom ? 'member' : $('#ufRole').value,
+    permissions: custom ? $$('#ufCaps input:checked').map((i) => i.value) : null,
+    macs: $('#ufMacs').value.split(',').map((s) => s.trim()).filter(Boolean),
+    disabled: $('#ufDisabled').checked,
+  };
+  if ($('#ufCode').value) body.code = $('#ufCode').value;
+  try {
+    if (editing) await jf('/api/access/users/' + editing.id, { method: 'PATCH', body: JSON.stringify(body) });
+    else await jf('/api/access/users', { method: 'POST', body: JSON.stringify(body) });
+    $('#modal').classList.remove('on');
+    loaders.access();
+  } catch (err) { $('#ufErr').textContent = err.message; }
+};
+
+$('#ufDelete').onclick = async () => {
+  if (!editing || !confirm('Remove ' + editing.name + '? Their sessions end immediately.')) return;
+  try {
+    await jf('/api/access/users/' + editing.id, { method: 'DELETE' });
+    $('#modal').classList.remove('on');
+    loaders.access();
+  } catch (err) { $('#ufErr').textContent = err.message; }
+};
+
+boot();
+</script>
+</body>
+</html>
