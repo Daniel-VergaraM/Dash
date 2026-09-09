@@ -787,11 +787,17 @@ let playlists = [];
 async function loadPlaylists() {
   try {
     playlists = await jf('/api/spotify/playlists');
-    $('#plList').innerHTML = playlists.map((p) => `<button data-pl="${esc(p.id)}" class="${p.id === openPlaylist ? 'on' : ''}">
-      <img src="${esc(p.image)}" alt="">
-      <span class="grow ellip">${esc(p.name)}<div class="muted small">${p.tracks} tracks${
-        p.owner ? ' · ' + esc(p.owner) : ''}</div></span>
-    </button>`).join('') || '<p class="muted small">No playlists.</p>';
+    // mine === false means Spotify will not serve the contents; say so before the click,
+    // not after a failed request. null means we could not tell, so we stay quiet.
+    $('#plList').innerHTML = playlists.map((p) => {
+      const locked = p.mine === false && !p.collaborative;
+      return `<button data-pl="${esc(p.id)}" class="${p.id === openPlaylist ? 'on' : ''}"
+          title="${locked ? 'Spotify only serves playlists you own or collaborate on' : ''}">
+        <img src="${esc(p.image)}" alt="">
+        <span class="grow ellip">${locked ? '🔒 ' : ''}${esc(p.name)}<div class="muted small">${p.tracks} tracks${
+          p.owner ? ' · ' + esc(p.owner) : ''}</div></span>
+      </button>`;
+    }).join('') || '<p class="muted small">No playlists.</p>';
     $$('#plList [data-pl]').forEach((b) => (b.onclick = () => openList(b.dataset.pl)));
   } catch (err) {
     $('#plList').innerHTML = err.status === 403

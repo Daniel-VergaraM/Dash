@@ -662,12 +662,20 @@ app.get('/api/spotify', can('music:read'), wrap(async () => {
 }));
 
 app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
-  const r = await api('spotify', '/v1/me/playlists?limit=50');
+  // Knowing who we are is what tells an owned playlist from a followed one. If this call is
+  // refused we simply cannot mark ownership, which is a worse hint but not an error.
+  const [r, self] = await Promise.all([
+    api('spotify', '/v1/me/playlists?limit=50'),
+    api('spotify', '/v1/me').catch(() => ({})),
+  ]);
   return (r.items || []).map((p) => ({
     id: p.id,
     uri: p.uri,
     name: p.name,
     owner: p.owner?.display_name || '',
+    // Development Mode only serves the contents of playlists you own or collaborate on.
+    mine: self.id ? p.owner?.id === self.id : null,
+    collaborative: !!p.collaborative,
     tracks: p.tracks?.total ?? 0,
     image: p.images?.at(-1)?.url || '',
   }));
@@ -681,11 +689,14 @@ app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
 // the contents.
 app.get('/api/spotify/playlists/:id', can('music:read'), wrap(async (req) => {
   const id = encodeURIComponent(req.params.id);
-  const page = await api('spotify', `/v1/playlists/${id}/items?limit=100`);
 
   // In Development Mode this endpoint only serves playlists the user owns or collaborates on.
-  // For anything else Spotify returns the metadata with no `items` field at all — which is a
-  // permission answer, not an empty playlist, and reads very differently to the person.
+  // Spotify signals the refusal two different ways depending on the playlist: a 403, or a 200
+  // with the `items` field simply absent. Both mean "not yours", which is a permission answer
+  // rather than a failure, and reads very differently to the person looking at it.
+  const page = await api('spotify', `/v1/playlists/${id}/items?limit=100`)
+    .catch((e) => { if (e.status === 403) return {}; throw e; });
+
   if (!page.items) return { id: req.params.id, tracks: [], readable: false };
 
   return {
