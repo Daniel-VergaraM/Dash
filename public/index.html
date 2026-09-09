@@ -56,6 +56,8 @@
   nav .spacer { flex: 1; }
   nav .conn { font-size: 12px; color: var(--dim); padding: 3px 11px; }
   nav .conn b { color: var(--good); font-weight: 600; }
+  nav .conn div { display: flex; align-items: center; gap: 4px; }
+  nav .conn .x { font-size: 11px; margin-left: auto; }
   main { overflow: auto; padding: 22px 26px; }
   .view { display: none; }
   .view.on { display: block; }
@@ -502,9 +504,23 @@ async function boot() {
   $('#who').innerHTML = `<b>${esc(ME.user.name)}</b>
     <span class="tag ${ME.user.role === 'admin' ? 'admin' : ''}">${esc(ME.user.role)}</span>
     <span class="muted"> · via ${esc(ME.via || 'code')}</span>`;
-  $('#conn').innerHTML = Object.entries(ME.connected || {})
-    .map(([k, v]) => v ? `<div><b>●</b> ${k}</div>`
-      : `<div>○ ${can('connections:manage') && k !== 'github' ? `<a href="/auth/${k}">${k}</a>` : k}</div>`).join('');
+  // github comes from a token in .env, so it has no OAuth flow to start or revoke.
+  const manageable = (k) => can('connections:manage') && k !== 'github';
+  $('#conn').innerHTML = Object.entries(ME.connected || {}).map(([k, v]) => {
+    if (!manageable(k)) return `<div>${v ? '<b>●</b>' : '○'} ${k}</div>`;
+    return v
+      // Re-running the OAuth flow is also how you pick up newly added scopes, so a connected
+      // provider still needs to be clickable.
+      ? `<div><b>●</b> <a href="/auth/${k}" title="Reconnect ${k} (re-runs consent)">${k}</a>
+           <button class="x" data-disconnect="${k}" title="Disconnect ${k}">✕</button></div>`
+      : `<div>○ <a href="/auth/${k}">${k}</a></div>`;
+  }).join('');
+
+  $$('#conn [data-disconnect]').forEach((b) => (b.onclick = async () => {
+    if (!confirm(`Disconnect ${b.dataset.disconnect}? Its panel stops working until you reconnect.`)) return;
+    await jf('/api/disconnect/' + b.dataset.disconnect, { method: 'POST' });
+    boot();
+  }));
 
   const first = $$('nav button[data-view]').find((b) => !b.hidden);
   show(first ? first.dataset.view : 'today');

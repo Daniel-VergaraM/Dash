@@ -28,3 +28,5 @@
 {"at":1788986249404,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}
 {"at":1788987625244,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}
 {"at":1788988166364,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}
+{"at":1788988803539,"event":"signin","userId":"u_4f4492559a53","name":"Owner","via":"password","ip":"127.0.0.1"}
+{"at":1788988804340,"event":"provider-disconnected","by":"Owner","provider":"spotify"}
