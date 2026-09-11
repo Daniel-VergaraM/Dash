@@ -16,7 +16,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY server.js auth.js lib.js ./
+COPY server.js auth.js lib.js task-meta.js ./
 COPY --from=webbuild /app/public ./public
 
 # auth.json, tokens.json and the notes live here; the volume mounts over it.
