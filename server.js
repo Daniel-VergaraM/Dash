@@ -13,6 +13,7 @@ import {
   audit, readAudit, lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
+import { initTaskMeta, subtasksOf, setSubtasks, deleteSubtasksFor } from './task-meta.js';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
   generateAuthenticationOptions, verifyAuthenticationResponse,
@@ -28,6 +29,7 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 await fs.mkdir(NOTES, { recursive: true });
 await initAuth(DATA, process.env.ACCESS_PASSWORD);
+await initTaskMeta(DATA);
 
 let tokens = JSON.parse(await fs.readFile(TOKEN_FILE, 'utf8').catch(() => '{}'));
 const saveTokens = () => fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2));
@@ -64,6 +66,15 @@ const PROVIDERS = {
     extra: {},
     id: 'SPOTIFY_CLIENT_ID',
     secret: 'SPOTIFY_CLIENT_SECRET',
+  },
+  linear: {
+    authUrl: 'https://linear.app/oauth/authorize',
+    tokenUrl: 'https://api.linear.app/oauth/token',
+    api: 'https://api.linear.app',
+    scope: 'read,write',
+    extra: {},
+    id: 'LINEAR_CLIENT_ID',
+    secret: 'LINEAR_CLIENT_SECRET',
   },
 };
 
@@ -176,8 +187,8 @@ const me = (user, session) => ({
   user: { id: user.id, name: user.name, role: user.role },
   caps: capsOf(user),
   via: session?.via,
-  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN },
-  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID },
+  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN, linear: !!tokens.linear },
+  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID, linear: !!process.env.LINEAR_CLIENT_ID },
 });
 
 const app = express();
@@ -448,8 +459,8 @@ app.delete('/api/access/users/:id', can('users:manage'), wrap(async (req) => {
 /* ---------- provider connections ---------- */
 
 const status = () => ({
-  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN },
-  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID },
+  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN, linear: !!tokens.linear },
+  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID, linear: !!process.env.LINEAR_CLIENT_ID },
 });
 
 app.get('/auth/:name', can('connections:manage'), (req, res) => {
@@ -498,21 +509,32 @@ const shape = (e) => ({
   location: e.location || '',
   task: e.extendedProperties?.private?.dash === 'task',
   done: e.extendedProperties?.private?.done === '1',
+  priority: e.extendedProperties?.private?.priority || null,
+  project: e.extendedProperties?.private?.project || null,
 });
 
-app.get('/api/events', can('calendar:read', 'tasks:read'), wrap(async (req) => {
+const PRIORITIES = ['low', 'med', 'high'];
+const cleanPriority = (raw) => (PRIORITIES.includes(raw) ? raw : undefined);
+
+// Shared by /api/events and the project-scoped task routes below, so the window/paging
+// query is built in exactly one place.
+async function fetchEventsWindow(days) {
   const from = new Date();
   from.setHours(0, 0, 0, 0);
-  const days = Math.min(Math.max(Number(req.query.days) || 14, 1), 90);
+  const clamped = Math.min(Math.max(Number(days) || 14, 1), 90);
   const q = new URLSearchParams({
     timeMin: from.toISOString(),
-    timeMax: new Date(from.getTime() + days * 864e5).toISOString(),
+    timeMax: new Date(from.getTime() + clamped * 864e5).toISOString(),
     singleEvents: 'true',
     orderBy: 'startTime',
     maxResults: '250',
   });
   const r = await api('google', eventsUrl(`?${q}`));
-  const items = (r.items || []).map(shape);
+  return (r.items || []).map(shape);
+}
+
+app.get('/api/events', can('calendar:read', 'tasks:read'), wrap(async (req) => {
+  const items = await fetchEventsWindow(req.query.days || 14);
   if (req.query.tasks) return items.filter((i) => i.task);
   // Someone with tasks:read but not calendar:read sees only their tasks, never the diary.
   return allows(req.user, 'calendar:read') ? items : items.filter((i) => i.task);
@@ -522,6 +544,12 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   const title = String(req.body?.title || '').trim();
   if (!title) throw fail(400, 'title required');
   const { start, end } = taskWindow(req.body?.start, req.body?.minutes);
+
+  const priv = { ...TASK_FLAG };
+  const priority = cleanPriority(req.body?.priority);
+  if (priority) priv.priority = priority;
+  if (req.body?.project) priv.project = String(req.body.project).slice(0, 64);
+
   return shape(await api('google', eventsUrl(), {
     method: 'POST',
     body: JSON.stringify({
@@ -529,32 +557,150 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
       description: String(req.body?.notes || ''),
       start: { dateTime: start },
       end: { dateTime: end },
-      extendedProperties: { private: TASK_FLAG },
+      extendedProperties: { private: priv },
       reminders: { useDefault: true },
     }),
   }));
 }));
 
 app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
+  const id = encodeURIComponent(req.params.id);
   const body = {};
-  if (req.body?.done !== undefined) {
-    body.extendedProperties = { private: { ...TASK_FLAG, done: req.body.done ? '1' : '0' } };
+
+  const touchesPrivate = req.body?.done !== undefined
+    || req.body?.priority !== undefined
+    || req.body?.project !== undefined;
+
+  if (touchesPrivate) {
+    // Google's PATCH replaces extendedProperties.private wholesale rather than merging
+    // keys — every field that should survive has to be read first and re-sent whole.
+    // ponytail: one extra round-trip per private-field write, no lock against a
+    // concurrent writer racing this read; acceptable at single-operator scale, same
+    // risk profile as auth.json's non-atomic save().
+    const current = await api('google', eventsUrl(`/${id}`));
+    const priv = { ...TASK_FLAG, ...current.extendedProperties?.private };
+
+    if (req.body.done !== undefined) priv.done = req.body.done ? '1' : '0';
+    if (req.body.priority !== undefined) {
+      const p = cleanPriority(req.body.priority);
+      if (p) priv.priority = p; else delete priv.priority;
+    }
+    if (req.body.project !== undefined) {
+      if (req.body.project) priv.project = String(req.body.project).slice(0, 64);
+      else delete priv.project;
+    }
+    body.extendedProperties = { private: priv };
   }
+
   if (req.body?.title) body.summary = String(req.body.title);
   if (req.body?.start) {
     const { start, end } = taskWindow(req.body.start, req.body.minutes);
     Object.assign(body, { start: { dateTime: start }, end: { dateTime: end } });
   }
-  return shape(await api('google', eventsUrl(`/${encodeURIComponent(req.params.id)}`), {
-    method: 'PATCH',
-    body: JSON.stringify(body),
-  }));
+
+  return shape(await api('google', eventsUrl(`/${id}`), { method: 'PATCH', body: JSON.stringify(body) }));
 }));
 
 app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
   await api('google', eventsUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
+  await deleteSubtasksFor(req.params.id);
   return { ok: true };
 }));
+
+/* ---------- Projects (Linear — NOT a local store, NOT Calendar-backed) ---------- */
+
+// Linear's whole API is one GraphQL endpoint; errors come back as HTTP 200 with an
+// `errors` array, which api()'s res.ok check does not catch, so that's checked here.
+async function linear(query, variables) {
+  const j = await api('linear', '/graphql', { method: 'POST', body: JSON.stringify({ query, variables }) });
+  if (j.errors?.length) throw fail(400, j.errors.map((e) => e.message).join('; '));
+  return j.data;
+}
+
+const PROJECT_FIELDS = `
+  id name description color icon url progress targetDate startDate createdAt archivedAt
+  status { id name type color }
+  lead { name }
+`;
+
+app.get('/api/projects', can('projects:read'), wrap(async (req) => {
+  const data = await linear(`query { projects(first: 100, includeArchived: false, orderBy: updatedAt) { nodes { ${PROJECT_FIELDS} } } }`);
+  const projects = data.projects.nodes;
+  // Stats need a Calendar read, so they're opt-in (?stats=1) and only computed for
+  // someone who actually holds tasks:read — projects:read alone doesn't imply it.
+  if (!req.query.stats || !allows(req.user, 'tasks:read')) return projects;
+
+  const counts = {};
+  for (const t of await fetchEventsWindow(90).catch(() => [])) {
+    if (!t.task || !t.project) continue;
+    counts[t.project] ||= { total: 0, done: 0 };
+    counts[t.project].total++;
+    if (t.done) counts[t.project].done++;
+  }
+  return projects.map((p) => ({ ...p, stats: counts[p.id] || { total: 0, done: 0 } }));
+}));
+
+app.post('/api/projects', can('projects:write'), wrap(async (req) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) throw fail(400, 'name required');
+  const teamIds = Array.isArray(req.body?.teamIds) ? req.body.teamIds.filter(Boolean) : [];
+  if (!teamIds.length) throw fail(400, 'at least one team is required');
+
+  const input = { name, teamIds };
+  if (req.body?.color) input.color = String(req.body.color);
+  if (req.body?.description) input.description = String(req.body.description).slice(0, 5000);
+  if (req.body?.statusId) input.statusId = String(req.body.statusId);
+  if (req.body?.targetDate) input.targetDate = String(req.body.targetDate);
+
+  const data = await linear(
+    `mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { success project { ${PROJECT_FIELDS} } } }`,
+    { input },
+  );
+  if (!data.projectCreate.success) throw fail(502, 'Linear rejected the project');
+  return data.projectCreate.project;
+}));
+
+app.patch('/api/projects/:id', can('projects:write'), wrap(async (req) => {
+  const input = {};
+  for (const k of ['name', 'color', 'description', 'statusId', 'targetDate']) {
+    if (req.body?.[k] !== undefined) input[k] = req.body[k];
+  }
+  const data = await linear(
+    `mutation($id: String!, $input: ProjectUpdateInput!) { projectUpdate(id: $id, input: $input) { success project { ${PROJECT_FIELDS} } } }`,
+    { id: req.params.id, input },
+  );
+  if (!data.projectUpdate.success) throw fail(502, 'Linear rejected the update');
+  return data.projectUpdate.project;
+}));
+
+app.delete('/api/projects/:id', can('projects:write'), wrap(async (req) => {
+  const data = await linear(`mutation($id: String!) { projectDelete(id: $id) { success } }`, { id: req.params.id });
+  if (!data.projectDelete.success) throw fail(502, 'Linear rejected the delete');
+  return { ok: true };
+}));
+
+app.get('/api/projects/:id/tasks', can('tasks:read'), wrap(async (req) => {
+  const items = await fetchEventsWindow(req.query.days || 90);
+  return items.filter((i) => i.task && i.project === req.params.id);
+}));
+
+app.get('/api/linear/teams', can('projects:read'), wrap(async () => {
+  const data = await linear(`query { teams(first: 100) { nodes { id name } } }`);
+  return data.teams.nodes;
+}));
+
+app.get('/api/linear/statuses', can('projects:read'), wrap(async () => {
+  const data = await linear(`query { projectStatuses(first: 50) { nodes { id name type color } } }`);
+  return data.projectStatuses.nodes;
+}));
+
+/* ---------- Subtasks (local store, keyed by Calendar event id) ---------- */
+
+app.get('/api/tasks/:id/subtasks', can('tasks:read', 'tasks:write'), wrap(async (req) =>
+  subtasksOf(req.params.id)));
+
+app.put('/api/tasks/:id/subtasks', can('tasks:write'), wrap(async (req) =>
+  setSubtasks(req.params.id, req.body?.subtasks)));
 
 /* ---------- Drive ---------- */
 

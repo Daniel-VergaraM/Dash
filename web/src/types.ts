@@ -1,6 +1,7 @@
 export type Capability =
   | 'tasks:read' | 'tasks:write' | 'calendar:read' | 'notes:read' | 'notes:write'
   | 'drive:read' | 'music:read' | 'music:control' | 'github:read'
+  | 'projects:read' | 'projects:write'
   | 'connections:manage' | 'users:manage';
 
 export type Role = 'admin' | 'member' | 'guest';
@@ -10,13 +11,15 @@ export interface Me {
   user: { id: string; name: string; role: Role };
   caps: Capability[];
   via?: string;
-  connected: Record<'google' | 'spotify' | 'github', boolean>;
-  configured: Record<'google' | 'spotify', boolean>;
+  connected: Record<'google' | 'spotify' | 'github' | 'linear', boolean>;
+  configured: Record<'google' | 'spotify' | 'linear', boolean>;
 }
 
 export interface ApiError extends Error {
   status?: number;
 }
+
+export type Priority = 'low' | 'med' | 'high';
 
 export interface CalEvent {
   id: string;
@@ -28,6 +31,36 @@ export interface CalEvent {
   link: string;
   location: string;
   task: boolean;
+  done: boolean;
+  priority: Priority | null;
+  project: string | null;
+}
+
+export interface LinearTeam { id: string; name: string; }
+
+export type LinearStatusType = 'backlog' | 'planned' | 'started' | 'paused' | 'completed' | 'canceled';
+export interface LinearProjectStatus { id: string; name: string; type: LinearStatusType; color: string; }
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  icon: string | null;
+  url: string;
+  progress: number;
+  targetDate: string | null;
+  startDate: string | null;
+  createdAt: string;
+  archivedAt: string | null;
+  status: LinearProjectStatus;
+  lead: { name: string } | null;
+  stats?: { total: number; done: number };
+}
+
+export interface Subtask {
+  id: string;
+  title: string;
   done: boolean;
 }
 
@@ -111,4 +144,4 @@ export interface AccessData {
 }
 
 export type ViewName =
-  | 'today' | 'calendar' | 'notes' | 'drive' | 'music' | 'github' | 'account' | 'access';
+  | 'today' | 'tasks' | 'calendar' | 'notes' | 'drive' | 'music' | 'github' | 'account' | 'access';

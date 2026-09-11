@@ -113,16 +113,21 @@ lockout bucket, so a single attacker locks everyone out. With it set, Express re
 client from `X-Forwarded-For`, trusting the header only from private hops. Left blank the
 header is ignored entirely, which is why it must stay blank when nothing sits in front.
 
-Register `https://dash.dvergaram.is-local.org/auth/google/callback` and `/auth/spotify/callback`
-as the redirect URIs in the Google and Spotify consoles.
+Register `https://dash.dvergaram.is-local.org/auth/google/callback`, `/auth/spotify/callback`,
+and `/auth/linear/callback` as the redirect URIs in the Google, Spotify, and Linear consoles.
 
 ## Connecting the services
 
-`GITHUB_TOKEN` is read from `.env` at startup. Google and Spotify use OAuth: sign in, then
-click the greyed-out provider in the sidebar (or hit `/auth/google`, `/auth/spotify`).
-Refresh tokens are handled automatically.
+`GITHUB_TOKEN` is read from `.env` at startup. Google, Spotify, and Linear use OAuth: sign in,
+then click the greyed-out provider in the sidebar (or hit `/auth/google`, `/auth/spotify`,
+`/auth/linear`). Refresh tokens are handled automatically.
 
 Google scopes: `calendar` (read/write, for tasks) and `drive.readonly`.
+
+Linear scopes: `read,write`, covering project create/edit/archive. A Linear project always
+belongs to at least one team, so creating a project from Dash requires picking one. Projects
+are Linear's own entity — Dash proxies CRUD to Linear's GraphQL API rather than storing them
+locally; the only local state is which Linear project id a task (Calendar event) points at.
 
 Spotify scopes now include `playlist-read-private` and `playlist-read-collaborative`.
 **A stored token keeps the scopes it was granted**, so after pulling this change you have to
@@ -145,9 +150,15 @@ to playlists you own or collaborate on: for anyone else's, Spotify returns the m
 | | |
 |---|---|
 | `GET /api/events?days=14&tasks=1` | calendar agenda; `tasks=1` filters to tasks |
-| `POST /api/tasks` | `{title, start, minutes, notes}` |
-| `PATCH /api/tasks/:id` | `{done}` / `{title}` / `{start, minutes}` |
+| `POST /api/tasks` | `{title, start, minutes, notes, priority, project}` |
+| `PATCH /api/tasks/:id` | `{done}` / `{title}` / `{start, minutes}` / `{priority}` / `{project}` |
 | `DELETE /api/tasks/:id` | |
+| `GET·PUT /api/tasks/:id/subtasks` | checklist per task; `PUT` replaces the whole list |
+| `GET /api/projects?stats=1` | Linear projects; `stats=1` adds `{total, done}` from your Calendar tasks |
+| `POST /api/projects` | `{name, teamIds, color, description, statusId, targetDate}` — proxies to Linear |
+| `PATCH·DELETE /api/projects/:id` | edit / soft-delete (trash) a Linear project |
+| `GET /api/projects/:id/tasks` | this app's tasks tagged with that Linear project |
+| `GET /api/linear/teams`, `GET /api/linear/statuses` | pickers for the project create/edit form |
 | `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | markdown files |
 | `GET /api/drive?folder=&q=` | browse a folder, or search everywhere |
 | `GET /api/drive/:id/preview` | streams the file from our own origin |

@@ -13,5 +13,8 @@ server.log
 web/vite.config.js
 web/vite.config.d.ts
 .impeccable/
+docs/
 DESIGN.md
 PRODUCT.md
+CLAUDE.md
+AGENTS.md

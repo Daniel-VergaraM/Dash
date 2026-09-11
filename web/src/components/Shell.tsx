@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Home, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X,
+  Home, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import type { Capability, ViewName } from '../types';
 import { jf } from '../lib/api';
 import { getKbdMode, setKbdMode as persistKbdMode } from '../lib/kbdMode';
 import Today from './views/Today';
+import Tasks from './views/Tasks';
 import CalendarView from './views/CalendarView';
 import Notes from './views/Notes';
 import Drive from './views/Drive';
@@ -17,6 +18,7 @@ import Access from './views/Access';
 
 const NAV: { view: ViewName; label: string; cap?: Capability; icon: typeof Home; key: string }[] = [
   { view: 'today', label: 'Today', icon: Home, key: 't' },
+  { view: 'tasks', label: 'Tasks', cap: 'tasks:read', icon: ListChecks, key: 'k' },
   { view: 'calendar', label: 'Calendar', cap: 'calendar:read', icon: CalendarDays, key: 'c' },
   { view: 'notes', label: 'Notes', cap: 'notes:read', icon: FileText, key: 'n' },
   { view: 'drive', label: 'Drive', cap: 'drive:read', icon: FolderOpen, key: 'd' },
@@ -154,6 +156,7 @@ export default function Shell() {
 
       <main id="main" tabIndex={-1}>
         <Section active={view === 'today'}><Today active={view === 'today'} /></Section>
+        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} /></Section>
         <Section active={view === 'calendar'}><CalendarView active={view === 'calendar'} /></Section>
         <Section active={view === 'notes'}><Notes active={view === 'notes'} /></Section>
         <Section active={view === 'drive'}><Drive active={view === 'drive'} /></Section>

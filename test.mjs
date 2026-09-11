@@ -10,6 +10,7 @@ import {
   lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
+import { initTaskMeta, subtasksOf, setSubtasks, deleteSubtasksFor } from './task-meta.js';
 
 /* ---------- lib ---------- */
 
@@ -65,6 +66,8 @@ assert.ok(ROLES.admin.includes('users:manage'));
 assert.ok(!ROLES.member.includes('users:manage'), 'members must not manage access');
 assert.ok(!ROLES.guest.some((c) => c.endsWith(':write') || c.endsWith(':manage')), 'guests are read-only');
 assert.equal(ROLES.admin.length, Object.keys(CAPABILITIES).length);
+assert.ok(ROLES.member.includes('projects:write'));
+assert.ok(ROLES.guest.includes('projects:read') && !ROLES.guest.includes('projects:write'));
 
 assert.deepEqual(capsOf({ role: 'guest' }), ROLES.guest);
 assert.deepEqual(capsOf({ role: 'admin', permissions: ['notes:read'] }), ['notes:read'], 'override beats role');
@@ -219,5 +222,31 @@ assert.ok(await signIn('Old', '424242 was a code'), 'the old credential still op
 assert.equal(getUser('u_legacy').codeHash, undefined, 'codeHash is gone once migrated');
 assert.deepEqual(passkeysOf('u_legacy'), [], 'older records gain an empty passkey list');
 await fs.rm(legacyDir, { recursive: true, force: true });
+
+/* ---------- subtasks store, end to end ---------- */
+
+const tmDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dash-taskmeta-'));
+await initTaskMeta(tmDir);
+assert.deepEqual(subtasksOf('evt1'), []);
+
+const list = await setSubtasks('evt1', [{ title: 'Buy tiles' }, { title: 'Call plumber', done: true }]);
+assert.equal(list.length, 2);
+assert.ok(list[0].id.startsWith('s_'));
+assert.equal(subtasksOf('evt1').length, 2);
+
+const capped = await setSubtasks('evt1', Array.from({ length: 60 }, (_, i) => ({ title: 'item ' + i })));
+assert.equal(capped.length, 50, 'subtask lists are capped at 50');
+
+await setSubtasks('evt1', []);
+assert.deepEqual(subtasksOf('evt1'), [], 'an empty list clears the entry entirely');
+
+await setSubtasks('evt2', [{ title: 'solo' }]);
+await deleteSubtasksFor('evt2');
+assert.deepEqual(subtasksOf('evt2'), []);
+
+await initTaskMeta(tmDir); // persistence round-trip does not crash on an empty store
+assert.deepEqual(subtasksOf('evt1'), []);
+
+await fs.rm(tmDir, { recursive: true, force: true });
 
 console.log('ok');

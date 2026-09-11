@@ -27,6 +27,8 @@ export const CAPABILITIES = {
   'music:read': 'See what is playing',
   'music:control': 'Control playback',
   'github:read': 'See repositories and activity',
+  'projects:read': 'See projects',
+  'projects:write': 'Create, edit and delete projects',
   'connections:manage': 'Connect and disconnect Google / Spotify',
   'users:manage': 'Manage people, passwords, devices and permissions',
 };
@@ -36,7 +38,7 @@ const ALL = Object.keys(CAPABILITIES);
 export const ROLES = {
   admin: ALL,
   member: ALL.filter((c) => c !== 'users:manage'),
-  guest: ['tasks:read', 'calendar:read', 'notes:read', 'music:read', 'github:read'],
+  guest: ['tasks:read', 'calendar:read', 'notes:read', 'music:read', 'github:read', 'projects:read'],
 };
 
 // An explicit permissions array overrides the role; otherwise the role's defaults apply.
