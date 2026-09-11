@@ -7,6 +7,9 @@
 # The published port is bound to the Docker bridge address only, so :3000 is NOT reachable
 # from the internet — every request has to come through Caddy. (pdf-reader publishes
 # 0.0.0.0:2077, which leaves that one open on the public IP; worth tightening the same way.)
+#
+# For local testing without Caddy, add a docker-compose.override.yml (gitignored) that
+# rebinds ports to 0.0.0.0 — do not edit the binding below.
 
 services:
   dash:

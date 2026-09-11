@@ -1,0 +1,124 @@
+import { useCallback, useEffect, useState } from 'react';
+import { jf, ago } from '../../lib/api';
+import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
+import type { Passkey } from '../../types';
+
+export default function Account({ active, kbdMode, onKbdModeChange, shortcuts }: {
+  active: boolean;
+  kbdMode: boolean;
+  onKbdModeChange: (on: boolean) => void;
+  shortcuts: { view: string; label: string; key: string }[];
+}) {
+  const webauthn = hasWebAuthn();
+  const [keys, setKeys] = useState<Passkey[]>([]);
+  const [pkMsg, setPkMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNext, setPwNext] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwMsg, setPwMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+
+  const loadKeys = useCallback(async () => setKeys(await jf<Passkey[]>('/api/passkeys')), []);
+  useEffect(() => { if (active) loadKeys(); }, [active, loadKeys]);
+
+  async function onPwSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setPwMsg(null);
+    if (pwNext !== pwConfirm) { setPwMsg({ text: 'The two new passwords do not match.' }); return; }
+    try {
+      await jf('/api/me/password', { method: 'POST', body: JSON.stringify({ current: pwCurrent, next: pwNext }) });
+      setPwCurrent(''); setPwNext(''); setPwConfirm('');
+      setPwMsg({ text: 'Password updated.', ok: true });
+    } catch (e) { setPwMsg({ text: (e as Error).message }); }
+  }
+
+  async function removeKey(id: string) {
+    if (!confirm('Remove this passkey?')) return;
+    try { await jf('/api/passkeys/' + encodeURIComponent(id), { method: 'DELETE' }); loadKeys(); }
+    catch (e) { setPkMsg({ text: (e as Error).message }); }
+  }
+
+  async function addKey() {
+    setPkMsg(null);
+    try {
+      const label = prompt('Name this passkey (e.g. "Phone", "Laptop")') || 'Passkey';
+      const options = await jf<any>('/api/passkeys/options', { method: 'POST', body: '{}' });
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          ...options,
+          challenge: b64uToBuf(options.challenge),
+          user: { ...options.user, id: b64uToBuf(options.user.id) },
+          excludeCredentials: (options.excludeCredentials || []).map((c: any) => ({ ...c, id: b64uToBuf(c.id) })),
+        },
+      }) as PublicKeyCredential | null;
+      if (!credential) return;
+      await jf('/api/passkeys', { method: 'POST', body: JSON.stringify({ response: credToJSON(credential), label }) });
+      setPkMsg({ text: 'Passkey added.', ok: true });
+      loadKeys();
+    } catch (e) {
+      const err = e as Error;
+      if (err.name === 'NotAllowedError' || err.name === 'AbortError') return;
+      setPkMsg({ text: err.name === 'InvalidStateError' ? 'That device already has a passkey for this site.' : err.message });
+    }
+  }
+
+  return (
+    <>
+      <h2>Account</h2>
+      <div className="grid">
+        <div className="card">
+          <h3>Change your password</h3>
+          <form onSubmit={onPwSubmit}>
+            <input type="password" placeholder="Current password" autoComplete="current-password"
+              style={{ width: '100%', marginBottom: 8 }} value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />
+            <input type="password" placeholder="New password" autoComplete="new-password"
+              style={{ width: '100%', marginBottom: 8 }} value={pwNext} onChange={(e) => setPwNext(e.target.value)} />
+            <input type="password" placeholder="Repeat new password" autoComplete="new-password"
+              style={{ width: '100%', marginBottom: 10 }} value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} />
+            <button className="primary" type="submit">Update password</button>
+            {pwMsg && <div className="small" style={{ marginTop: 8, color: pwMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pwMsg.text}</div>}
+          </form>
+        </div>
+
+        <div className="card">
+          <h3>Passkeys</h3>
+          <p className="muted small" style={{ marginTop: -6 }}>
+            Sign in with your fingerprint, face or device PIN — no password to type or leak.
+          </p>
+          <ul className="list">
+            {keys.length ? keys.map((k) => (
+              <li key={k.id}>
+                <span className="grow">
+                  <b>{k.label}</b>
+                  <div className="muted small">added {ago(k.createdAt)} · {k.lastUsed ? 'last used ' + ago(k.lastUsed) : 'never used'}</div>
+                </span>
+                <button className="x" title="Remove" onClick={() => removeKey(k.id)}>✕</button>
+              </li>
+            )) : <p className="muted">No passkeys yet.</p>}
+          </ul>
+          {webauthn
+            ? <button className="primary" style={{ marginTop: 12 }} onClick={addKey}>+ Add a passkey</button>
+            : <span className="muted">This browser does not support passkeys.</span>}
+          {pkMsg && <div className="small" style={{ marginTop: 8, color: pkMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pkMsg.text}</div>}
+        </div>
+
+        <div className="card">
+          <h3>Accessibility</h3>
+          <p className="muted small" style={{ marginTop: -6 }}>
+            Arrow keys already move between sidebar views. Press <b>g</b> then a letter to jump
+            directly: {shortcuts.map((s, i) => (
+              <span key={s.view}>{i > 0 ? ', ' : ''}<b>g {s.key}</b> {s.label}</span>
+            ))}.
+          </p>
+          <label className="rowlabel">
+            <input
+              type="checkbox" checked={kbdMode}
+              onChange={(e) => onKbdModeChange(e.target.checked)}
+            />
+            Boosted focus outlines
+          </label>
+        </div>
+      </div>
+    </>
+  );
+}

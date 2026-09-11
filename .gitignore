@@ -1,5 +1,17 @@
 .env
+docker-compose.override.yml
 node_modules/
 data/tokens.json
 data/notes/
 server.log
+
+# Built by `pnpm run build` (web/ -> public/) or the Docker webbuild stage.
+/public/
+
+# tsc -b build cache and its emitted output for the vite.config.ts project reference.
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+.impeccable/
+DESIGN.md
+PRODUCT.md

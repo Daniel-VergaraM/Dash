@@ -4,7 +4,10 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env server.js",
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "web:install": "pnpm --dir web install",
+    "web:dev": "pnpm --dir web dev",
+    "build": "pnpm --dir web build"
   },
   "dependencies": {
     "@simplewebauthn/server": "^14.0.1",
