@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
-import { noteName, macFromArp, taskWindow } from './lib.js';
+import { noteName, macFromArp, taskWindow, startOfDay } from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
   updateUser, deleteUser, signIn, userByMac, startSession, sessionUser, endSession, sessionsOf,
@@ -241,6 +241,7 @@ const me = (user, session) => ({
   user: { id: user.id, name: user.name, role: user.role },
   caps: capsOf(user),
   via: session?.via,
+  timezone: user.timezone || null,
   ...connectionState(user.id),
 });
 
@@ -412,6 +413,13 @@ app.post('/api/me/password', wrap(async (req) => {
   return { ok: true };
 }));
 
+// No capability gate: only ever touches the caller's own record. `null` clears it, falling
+// back to the server's own timezone for date math (today's behavior for anyone who never sets one).
+app.post('/api/me/timezone', wrap(async (req) => {
+  const user = await updateUser(req.user.id, { timezone: req.body?.timezone ?? null });
+  return { timezone: user.timezone || null };
+}));
+
 /* ---------- passkeys: registering your own ---------- */
 // No capability gate: these only ever touch the caller's own credentials.
 
@@ -567,8 +575,7 @@ const cleanPriority = (raw) => (PRIORITIES.includes(raw) ? raw : undefined);
 // Shared by /api/events and the project-scoped task routes below, so the window/paging
 // query is built in exactly one place.
 async function fetchEventsWindow(userId, days) {
-  const from = new Date();
-  from.setHours(0, 0, 0, 0);
+  const from = startOfDay(getUser(userId)?.timezone);
   const clamped = Math.min(Math.max(Number(days) || 14, 1), 90);
   const q = new URLSearchParams({
     timeMin: from.toISOString(),
@@ -591,7 +598,7 @@ app.get('/api/events', can('calendar:read', 'tasks:read'), wrap(async (req) => {
 app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   const title = String(req.body?.title || '').trim();
   if (!title) throw fail(400, 'title required');
-  const { start, end } = taskWindow(req.body?.start, req.body?.minutes);
+  const { start, end } = taskWindow(req.body?.start, req.body?.minutes, req.user.timezone);
 
   const priv = { ...TASK_FLAG };
   const priority = cleanPriority(req.body?.priority);
@@ -642,7 +649,7 @@ app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
 
   if (req.body?.title) body.summary = String(req.body.title);
   if (req.body?.start) {
-    const { start, end } = taskWindow(req.body.start, req.body.minutes);
+    const { start, end } = taskWindow(req.body.start, req.body.minutes, req.user.timezone);
     Object.assign(body, { start: { dateTime: start }, end: { dateTime: end } });
   }
 

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { jf, ago } from '../../lib/api';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
+import { useAuth } from '../../context/AuthContext';
 import type { Passkey } from '../../types';
+
+const TIMEZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVimNavChange, shortcuts }: {
   active: boolean;
@@ -12,8 +16,22 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
   shortcuts: { view: string; label: string; key: string }[];
 }) {
   const webauthn = hasWebAuthn();
+  const { me, refresh } = useAuth();
   const [keys, setKeys] = useState<Passkey[]>([]);
   const [pkMsg, setPkMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+
+  const [tz, setTz] = useState(me?.timezone || BROWSER_TZ);
+  const [tzMsg, setTzMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+  useEffect(() => { setTz(me?.timezone || BROWSER_TZ); }, [me?.timezone]);
+
+  async function saveTz() {
+    setTzMsg(null);
+    try {
+      await jf('/api/me/timezone', { method: 'POST', body: JSON.stringify({ timezone: tz }) });
+      await refresh();
+      setTzMsg({ text: 'Timezone saved.', ok: true });
+    } catch (e) { setTzMsg({ text: (e as Error).message }); }
+  }
 
   const [pwCurrent, setPwCurrent] = useState('');
   const [pwNext, setPwNext] = useState('');
@@ -102,6 +120,24 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
             ? <button className="primary" style={{ marginTop: 12 }} onClick={addKey}>+ Add a passkey</button>
             : <span className="muted">This browser does not support passkeys.</span>}
           {pkMsg && <div className="small" style={{ marginTop: 8, color: pkMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pkMsg.text}</div>}
+        </div>
+
+        <div className="card">
+          <h3>Timezone</h3>
+          <p className="muted small" style={{ marginTop: -6 }}>
+            Used for "today"'s day boundary and for times you type into a task without one.
+          </p>
+          <select
+            value={tz} onChange={(e) => setTz(e.target.value)}
+            style={{ width: '100%', marginBottom: 8 }}
+          >
+            {!TIMEZONES.includes(tz) && <option value={tz}>{tz}</option>}
+            {TIMEZONES.map((z) => <option key={z} value={z}>{z}</option>)}
+          </select>
+          <button className="primary" onClick={saveTz} disabled={tz === (me?.timezone || BROWSER_TZ)}>
+            Save timezone
+          </button>
+          {tzMsg && <div className="small" style={{ marginTop: 8, color: tzMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{tzMsg.text}</div>}
         </div>
 
         <div className="card">

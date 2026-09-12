@@ -74,6 +74,12 @@ export function cleanName(raw) {
   return name.length >= 2 ? name : null;
 }
 
+// Every valid IANA zone name, e.g. "America/Mexico_City" — the same list a <select> populated
+// from the browser's own Intl.supportedValuesOf('timeZone') will send, so a well-behaved
+// client never gets rejected here.
+const TIMEZONES = new Set(Intl.supportedValuesOf('timeZone'));
+export const cleanTimezone = (raw) => (typeof raw === 'string' && TIMEZONES.has(raw) ? raw : null);
+
 export function cleanPermissions(raw) {
   if (raw === null || raw === undefined) return null; // null = inherit from role
   if (!Array.isArray(raw)) return null;
@@ -159,7 +165,7 @@ export const userByName = (name) =>
 const adminCount = () => db.users.filter((u) => !u.disabled && capsOf(u).includes('users:manage')).length;
 const canSignIn = (u) => !!u.passwordHash || u.macs.length > 0 || u.passkeys.length > 0;
 
-export async function createUser({ name, role = 'guest', password, macs = [], permissions = null }) {
+export async function createUser({ name, role = 'guest', password, macs = [], permissions = null, timezone = null }) {
   const clean = cleanName(name);
   if (!clean) throw Object.assign(new Error('name must be 2-40 characters'), { status: 400 });
   if (userByName(clean)) throw Object.assign(new Error('someone already has that name'), { status: 400 });
@@ -175,6 +181,7 @@ export async function createUser({ name, role = 'guest', password, macs = [], pe
     disabled: false,
     createdAt: Date.now(),
     lastSeen: null,
+    timezone: cleanTimezone(timezone),
   };
   if (!canSignIn(user)) {
     throw Object.assign(new Error('a person needs a password, a device MAC, or both'), { status: 400 });
@@ -204,6 +211,7 @@ export async function updateUser(id, patch) {
     next.role = patch.role;
   }
   if (patch.permissions !== undefined) next.permissions = cleanPermissions(patch.permissions);
+  if (patch.timezone !== undefined) next.timezone = cleanTimezone(patch.timezone);
   if (patch.macs !== undefined) next.macs = patch.macs.map(normalizeMac).filter(Boolean);
   if (patch.password) next.passwordHash = await hashPassword(patch.password);
   if (patch.clearPassword) next.passwordHash = null;

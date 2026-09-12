@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { noteName, macFromArp, taskWindow } from './lib.js';
+import { noteName, macFromArp, taskWindow, startOfDay } from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, capsOf, allows, validPassword, normalizeMac, cleanName,
-  cleanPermissions, hashPassword, verifyPassword, initAuth, createUser, updateUser, deleteUser,
-  signIn, userByMac, userByName, getUser, startSession, sessionUser, endSession, listUsers,
-  lockedFor, recordFailure, clearFailures,
+  cleanPermissions, cleanTimezone, hashPassword, verifyPassword, initAuth, createUser, updateUser,
+  deleteUser, signIn, userByMac, userByName, getUser, startSession, sessionUser, endSession,
+  listUsers, lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
 import { initTaskMeta, subtasksOf, setSubtasks, deleteSubtasksFor } from './task-meta.js';
@@ -37,6 +37,27 @@ assert.equal(taskWindow('2026-09-07T10:00:00.000Z').end, '2026-09-07T10:30:00.00
 assert.equal(taskWindow('2026-09-07T10:00:00.000Z', 1).end, '2026-09-07T10:05:00.000Z');
 assert.equal(taskWindow('2026-09-07T10:00:00.000Z', 99999).end, '2026-09-08T10:00:00.000Z');
 assert.throws(() => taskWindow('not a date', 30), /bad start time/);
+
+// Naive "no timezone" strings — a raw <input type="datetime-local"> value — are interpreted in
+// the given IANA zone rather than the server's own, once a user has one configured.
+assert.equal(taskWindow('2026-06-01T09:00', 30, 'America/Mexico_City').start, '2026-06-01T15:00:00.000Z');
+assert.equal(taskWindow('2026-06-01T09:00', 30, 'Asia/Tokyo').start, '2026-06-01T00:00:00.000Z');
+// An already-absolute string is never reinterpreted, tz or not.
+assert.equal(taskWindow('2026-06-01T09:00:00.000Z', 30, 'Asia/Tokyo').start, '2026-06-01T09:00:00.000Z');
+
+// Midnight in Tokyo (UTC+9) on 2026-06-01 is 2026-05-31T15:00:00.000Z.
+assert.equal(startOfDay('Asia/Tokyo', new Date('2026-06-01T10:00:00.000Z')).toISOString(), '2026-05-31T15:00:00.000Z');
+// No tz falls back to the process's own local midnight — today's exact prior behavior.
+{
+  const now = new Date('2026-06-01T10:00:00.000Z');
+  const want = new Date(now); want.setHours(0, 0, 0, 0);
+  assert.equal(startOfDay(undefined, now).getTime(), want.getTime());
+}
+
+assert.equal(cleanTimezone('America/Mexico_City'), 'America/Mexico_City');
+assert.equal(cleanTimezone('Not/AZone'), null);
+assert.equal(cleanTimezone(null), null);
+assert.equal(cleanTimezone(42), null);
 
 /* ---------- input cleaning ---------- */
 
@@ -115,6 +136,12 @@ const guest = await createUser({
   name: 'Guest', role: 'guest', password: GUEST_PW, macs: ['AA-BB-CC-DD-EE-01'],
 });
 assert.deepEqual(guest.macs, ['aa:bb:cc:dd:ee:01']);
+assert.equal(guest.timezone, null, 'unset by default');
+await updateUser(guest.id, { timezone: 'Europe/Madrid' });
+assert.equal(getUser(guest.id).timezone, 'Europe/Madrid');
+await updateUser(guest.id, { timezone: 'Not/AZone' });
+assert.equal(getUser(guest.id).timezone, null, 'an invalid zone clears rather than sticking');
+await updateUser(guest.id, { timezone: null });
 assert.equal((await signIn('Guest', GUEST_PW)).id, guest.id);
 assert.equal(await signIn('Guest', 'wrong passphrase here'), null);
 assert.equal(await signIn('Nobody', GUEST_PW), null, 'an unknown name must not sign anyone in');

@@ -11,6 +11,7 @@ export interface Me {
   user: { id: string; name: string; role: Role };
   caps: Capability[];
   via?: string;
+  timezone: string | null;
   connected: Record<'google' | 'spotify' | 'github' | 'linear', boolean>;
   configured: Record<'google' | 'spotify' | 'linear' | 'github', boolean>;
 }
