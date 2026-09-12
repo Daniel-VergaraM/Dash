@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { jf } from '../../lib/api';
+import { useListNav } from '../../lib/useListNav';
 import type { NoteMeta } from '../../types';
 
-export default function Notes({ active }: { active: boolean }) {
+export default function Notes({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const [notes, setNotes] = useState<NoteMeta[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [body, setBody] = useState('');
@@ -64,6 +65,15 @@ export default function Notes({ active }: { active: boolean }) {
     listNotes();
   }
 
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const { rowRef, onKeyDown, focusAt } = useListNav(notes.length, vimNav, {
+    onRight: async (i) => {
+      const n = notes[i];
+      if (n.name !== current) await openNote(n.name);
+      editorRef.current?.focus();
+    },
+  });
+
   return (
     <>
       <h2>Notes <span className="muted small">markdown + $\LaTeX$ &mdash; Ctrl+S saves</span></h2>
@@ -71,15 +81,24 @@ export default function Notes({ active }: { active: boolean }) {
         <div>
           <button className="primary" style={{ width: '100%', marginBottom: 8 }} onClick={newNote}>+ New note</button>
           <div id="noteList">
-            {notes.length ? notes.map((n) => (
-              <button key={n.name} className={n.name === current ? 'on' : ''} onClick={() => openNote(n.name)}>
+            {notes.length ? notes.map((n, i) => (
+              <button
+                key={n.name} ref={rowRef(i)} onKeyDown={(e) => onKeyDown(e, i)}
+                className={n.name === current ? 'on' : ''} onClick={() => openNote(n.name)}
+              >
                 {n.name.replace(/\.md$/, '')}
               </button>
             )) : <p className="muted small">No notes yet.</p>}
           </div>
         </div>
         <textarea
-          id="editor" value={body} onChange={(e) => setBody(e.target.value)}
+          id="editor" ref={editorRef} value={body} onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => {
+            if (!vimNav || e.key !== 'Escape') return;
+            e.preventDefault();
+            const idx = notes.findIndex((n) => n.name === current);
+            if (idx >= 0) focusAt(idx);
+          }}
           placeholder={'# Title\n\nInline math $e^{i\\pi}+1=0$, or display:\n\n$$\\int_0^\\infty e^{-x^2}dx = \\frac{\\sqrt\\pi}{2}$$'}
         />
         <div id="preview">

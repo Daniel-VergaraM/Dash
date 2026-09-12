@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, ago } from '../../lib/api';
 import type { AccessData, AccessUser } from '../../types';
+import { useListNav } from '../../lib/useListNav';
 import UserFormModal, { type UserFormValues } from './UserFormModal';
 
 const AUDIT_LABEL: Record<string, string> = {
@@ -15,7 +16,7 @@ const EMPTY: AccessData = {
   roles: { admin: [], member: [], guest: [] }, audit: [],
 };
 
-export default function Access({ active }: { active: boolean }) {
+export default function Access({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const { me } = useAuth();
   const [access, setAccess] = useState<AccessData>(EMPTY);
   const [device, setDevice] = useState<{ ip: string; mac: string; local: boolean } | null>(null);
@@ -65,6 +66,11 @@ export default function Access({ active }: { active: boolean }) {
     } catch (e) { alert((e as Error).message); }
   }
 
+  const { rowRef, onKeyDown } = useListNav(access.users.length, vimNav, {
+    onSelectToggle: (i) => toggleSelect(access.users[i].id),
+    onRight: (i) => setEditing(access.users[i]),
+  });
+
   if (!me) return null;
 
   return (
@@ -73,8 +79,11 @@ export default function Access({ active }: { active: boolean }) {
       <div className="card">
         <h3>People</h3>
         <div>
-          {access.users.map((u) => (
-            <div className="person" key={u.id}>
+          {access.users.map((u, i) => (
+            <div
+              className="person" key={u.id} ref={rowRef(i)}
+              tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)}
+            >
               <input
                 type="checkbox" checked={selected.has(u.id)} disabled={u.id === me.user.id}
                 aria-label={`Select ${u.name}`} onChange={() => toggleSelect(u.id)}

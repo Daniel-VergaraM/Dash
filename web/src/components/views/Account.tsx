@@ -3,10 +3,12 @@ import { jf, ago } from '../../lib/api';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
 import type { Passkey } from '../../types';
 
-export default function Account({ active, kbdMode, onKbdModeChange, shortcuts }: {
+export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVimNavChange, shortcuts }: {
   active: boolean;
   kbdMode: boolean;
   onKbdModeChange: (on: boolean) => void;
+  vimNav: boolean;
+  onVimNavChange: (on: boolean) => void;
   shortcuts: { view: string; label: string; key: string }[];
 }) {
   const webauthn = hasWebAuthn();
@@ -117,6 +119,21 @@ export default function Account({ active, kbdMode, onKbdModeChange, shortcuts }:
             />
             Boosted focus outlines
           </label>
+          <label className="rowlabel" style={{ marginTop: 8 }}>
+            <input
+              type="checkbox" checked={vimNav}
+              onChange={(e) => onVimNavChange(e.target.checked)}
+            />
+            vim/yazi list navigation (j/k, gg/G, Space, h/l)
+          </label>
+          <p className="muted small" style={{ marginTop: 6 }}>
+            When on, inside a list — Today, Tasks, Notes, Drive, Music, Access — <b>j</b>/<b>k</b> move
+            the cursor, <b>gg</b>/<b>G</b> jump to the top/bottom, <b>Space</b> toggles selection where
+            a list supports it (Access), and <b>h</b>/<b>l</b> move between panes — e.g. collapse/expand
+            a task's subtasks, step out of/into a Drive folder, or move from a note or playlist list
+            into its editor/tracks. This is on top of the arrow-key and click navigation above, not a
+            replacement.
+          </p>
         </div>
       </div>
     </>

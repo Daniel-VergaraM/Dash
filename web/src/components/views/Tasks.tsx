@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, fmtDay } from '../../lib/api';
 import type { ApiError, CalEvent, Priority, Project, Subtask } from '../../types';
+import { useListNav } from '../../lib/useListNav';
 import ConnectBox from '../ConnectBox';
 import ProjectsModal from '../ProjectsModal';
 
 const PRIORITIES: Priority[] = ['high', 'med', 'low'];
 const rank = (p: Priority | null) => (p ? PRIORITIES.indexOf(p) : PRIORITIES.length);
 
-export default function Tasks({ active }: { active: boolean }) {
+export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const { can } = useAuth();
   const [tasks, setTasks] = useState<CalEvent[] | null>(null);
   const [tasksErr, setTasksErr] = useState<ApiError | null>(null);
@@ -116,6 +117,11 @@ export default function Tasks({ active }: { active: boolean }) {
     .filter((t) => filterPriority === 'all' || t.priority === filterPriority)
     .sort((a, b) => (sortBy === 'priority' ? rank(a.priority) - rank(b.priority) : a.start.localeCompare(b.start)));
 
+  const { rowRef, onKeyDown } = useListNav(visible.length, vimNav, {
+    onLeft: (i) => { const t = visible[i]; if (expanded.has(t.id)) toggleExpand(t.id); },
+    onRight: (i) => { const t = visible[i]; if (!expanded.has(t.id)) toggleExpand(t.id); },
+  });
+
   return (
     <>
       <h2>Tasks</h2>
@@ -188,8 +194,8 @@ export default function Tasks({ active }: { active: boolean }) {
           ? (tasksErr ? <ConnectBox provider="google" err={tasksErr} /> : <p className="muted">Loading…</p>)
           : visible.length ? (
             <ul className="list">
-              {visible.map((t) => (
-                <li key={t.id} style={{ display: 'block' }}>
+              {visible.map((t, i) => (
+                <li key={t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)} style={{ display: 'block' }}>
                   <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
                     <input type="checkbox" checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
                     <span className="grow" style={{ minWidth: 0 }}>

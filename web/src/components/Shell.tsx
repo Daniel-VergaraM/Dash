@@ -5,7 +5,8 @@ import {
 import { useAuth } from '../context/AuthContext';
 import type { Capability, ViewName } from '../types';
 import { jf } from '../lib/api';
-import { getKbdMode, setKbdMode as persistKbdMode } from '../lib/kbdMode';
+import { getKbdMode, setKbdMode as persistKbdMode, getVimNav, setVimNav as persistVimNav } from '../lib/kbdMode';
+import { isTypingTarget } from '../lib/kbd';
 import Today from './views/Today';
 import Tasks from './views/Tasks';
 import CalendarView from './views/CalendarView';
@@ -28,18 +29,13 @@ const NAV: { view: ViewName; label: string; cap?: Capability; icon: typeof Home;
   { view: 'access', label: 'Access', cap: 'users:manage', icon: ShieldCheck, key: 'x' },
 ];
 
-function isTypingTarget(el: EventTarget | null) {
-  const t = el as HTMLElement | null;
-  if (!t) return false;
-  return t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable;
-}
-
 export default function Shell() {
   const { me, can, logout, refresh } = useAuth();
   const items = useMemo(() => NAV.filter((n) => !n.cap || can(n.cap)), [can]);
   const [view, setView] = useState<ViewName>(items[0]?.view ?? 'today');
   const [connBusy, setConnBusy] = useState<string | null>(null);
   const [kbdMode, setKbdModeState] = useState(() => getKbdMode());
+  const [vimNav, setVimNavState] = useState(() => getVimNav());
   const navRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [navFocusIdx, setNavFocusIdx] = useState(0);
 
@@ -51,6 +47,11 @@ export default function Shell() {
   function updateKbdMode(on: boolean) {
     setKbdModeState(on);
     persistKbdMode(on);
+  }
+
+  function updateVimNav(on: boolean) {
+    setVimNavState(on);
+    persistVimNav(on);
   }
 
   useEffect(() => {
@@ -155,17 +156,20 @@ export default function Shell() {
       </nav>
 
       <main id="main" tabIndex={-1}>
-        <Section active={view === 'today'}><Today active={view === 'today'} /></Section>
-        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} /></Section>
+        <Section active={view === 'today'}><Today active={view === 'today'} vimNav={vimNav} /></Section>
+        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} vimNav={vimNav} /></Section>
         <Section active={view === 'calendar'}><CalendarView active={view === 'calendar'} /></Section>
-        <Section active={view === 'notes'}><Notes active={view === 'notes'} /></Section>
-        <Section active={view === 'drive'}><Drive active={view === 'drive'} /></Section>
-        <Section active={view === 'music'}><MusicView active={view === 'music'} /></Section>
+        <Section active={view === 'notes'}><Notes active={view === 'notes'} vimNav={vimNav} /></Section>
+        <Section active={view === 'drive'}><Drive active={view === 'drive'} vimNav={vimNav} /></Section>
+        <Section active={view === 'music'}><MusicView active={view === 'music'} vimNav={vimNav} /></Section>
         <Section active={view === 'github'}><GitHubView active={view === 'github'} /></Section>
         <Section active={view === 'account'}>
-          <Account active={view === 'account'} kbdMode={kbdMode} onKbdModeChange={updateKbdMode} shortcuts={items} />
+          <Account
+            active={view === 'account'} kbdMode={kbdMode} onKbdModeChange={updateKbdMode}
+            vimNav={vimNav} onVimNavChange={updateVimNav} shortcuts={items}
+          />
         </Section>
-        <Section active={view === 'access'}><Access active={view === 'access'} /></Section>
+        <Section active={view === 'access'}><Access active={view === 'access'} vimNav={vimNav} /></Section>
       </main>
     </div>
   );

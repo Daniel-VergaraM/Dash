@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { jf, ago } from '../../lib/api';
 import type { ApiError, DriveFile } from '../../types';
+import { useListNav } from '../../lib/useListNav';
 import ConnectBox from '../ConnectBox';
 
 interface Crumb { id: string; name: string; }
 
-export default function Drive({ active }: { active: boolean }) {
+export default function Drive({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const [path, setPath] = useState<Crumb[]>([{ id: 'root', name: 'My Drive' }]);
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
@@ -51,6 +52,12 @@ export default function Drive({ active }: { active: boolean }) {
     load('', next);
   }
 
+  function activate(f: DriveFile) { f.folder ? openFolder(f) : setSelected(f); }
+  const { rowRef, onKeyDown } = useListNav(files?.length ?? 0, vimNav, {
+    onRight: (i) => files && activate(files[i]),
+    onLeft: () => { if (!searching && path.length > 1) goCrumb(path.length - 2); },
+  });
+
   return (
     <>
       <h2>Drive</h2>
@@ -74,11 +81,18 @@ export default function Drive({ active }: { active: boolean }) {
           <ul className="list" id="driveFiles">
             {files === null
               ? (err ? <ConnectBox provider="google" err={err} /> : <p className="muted">Loading…</p>)
-              : files.length ? files.map((f) => (
+              : files.length ? files.map((f, i) => (
                 <li key={f.id} className={selected?.id === f.id ? 'on' : ''}>
                   <img src={f.iconLink || ''} alt="" />
                   <span className="grow ellip">
-                    <a onClick={() => f.folder ? openFolder(f) : setSelected(f)}>{f.name}</a>
+                    <a
+                      ref={rowRef(i)} tabIndex={0} role="button"
+                      onClick={() => activate(f)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(f); return; }
+                        onKeyDown(e, i);
+                      }}
+                    >{f.name}</a>
                     <div className="muted small">
                       {f.folder ? 'folder' : f.mimeType.split('.').pop()} · {ago(f.modifiedTime)}
                     </div>

@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, ago, mmss } from '../../lib/api';
 import type { ApiError, SpotifyPlaylist, SpotifyTrack } from '../../types';
+import { useListNav } from '../../lib/useListNav';
 import ConnectBox from '../ConnectBox';
 
 type NowData = { now?: { item?: any; is_playing?: boolean }; recent: { track: any; played_at: string }[] };
 
-export default function MusicView({ active }: { active: boolean }) {
+export default function MusicView({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const { can } = useAuth();
   const [data, setData] = useState<NowData | null>(null);
   const [err, setErr] = useState<ApiError | null>(null);
@@ -66,6 +67,13 @@ export default function MusicView({ active }: { active: boolean }) {
   const playable = can('music:control');
   const t = data?.now?.item;
 
+  const { rowRef: plRowRef, onKeyDown: plOnKeyDown, focusAt: focusPl } = useListNav(playlists?.length ?? 0, vimNav, {
+    onRight: (i) => playlists && openList(playlists[i]),
+  });
+  const { rowRef: trRowRef, onKeyDown: trOnKeyDown } = useListNav(playable ? (tracks?.length ?? 0) : 0, vimNav, {
+    onLeft: () => focusPl(playlists?.findIndex((p) => p.id === openPlaylist) ?? 0),
+  });
+
   return (
     <>
       <h2>Music</h2>
@@ -105,10 +113,11 @@ export default function MusicView({ active }: { active: boolean }) {
                     ? <p className="muted small">Reading playlists needs a scope the stored token does not have — reconnect Spotify from the sidebar.</p>
                     : <p className="err small">{plErr.message}</p>
                 ) : <p className="muted small">Loading…</p>)
-              : playlists.length ? playlists.map((p) => {
+              : playlists.length ? playlists.map((p, i) => {
                 const locked = p.mine === false && !p.collaborative;
                 return (
-                  <button key={p.id} className={p.id === openPlaylist ? 'on' : ''}
+                  <button key={p.id} ref={plRowRef(i)} onKeyDown={(e) => plOnKeyDown(e, i)}
+                    className={p.id === openPlaylist ? 'on' : ''}
                     title={locked ? 'Spotify only serves playlists you own or collaborate on' : ''}
                     onClick={() => openList(p)}>
                     <img src={p.image} alt="" />
@@ -128,8 +137,17 @@ export default function MusicView({ active }: { active: boolean }) {
               : openPlaylist ? (
                 tracks === null ? <p className="muted">Loading…</p>
                 : tracks.length ? tracks.map((tr, i) => (
-                  <li key={tr.uri + i} className={playable ? 'play' : ''} title={playable ? 'Play' : ''}
-                    onClick={() => playable && playTrack(tr)}>
+                  <li
+                    key={tr.uri + i}
+                    ref={playable ? trRowRef(i) : undefined}
+                    tabIndex={playable ? 0 : undefined}
+                    className={playable ? 'play' : ''} title={playable ? 'Play' : ''}
+                    onClick={() => playable && playTrack(tr)}
+                    onKeyDown={playable ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); playTrack(tr); return; }
+                      trOnKeyDown(e, i);
+                    } : undefined}
+                  >
                     <span className="muted small" style={{ width: 24, flex: 'none', textAlign: 'right' }}>{i + 1}</span>
                     <img src={tr.image} alt="" />
                     <span className="grow ellip">{tr.name}<div className="muted small ellip">{tr.artists}</div></span>

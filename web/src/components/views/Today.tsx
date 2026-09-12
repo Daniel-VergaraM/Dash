@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, fmtDay } from '../../lib/api';
 import type { ApiError, CalEvent } from '../../types';
+import { useListNav } from '../../lib/useListNav';
 import AgendaList from '../AgendaList';
 import ConnectBox from '../ConnectBox';
 
@@ -12,7 +13,7 @@ function defaultWhen() {
   return d.toISOString().slice(0, 16);
 }
 
-export default function Today({ active }: { active: boolean }) {
+export default function Today({ active, vimNav }: { active: boolean; vimNav: boolean }) {
   const { can } = useAuth();
   const [tasks, setTasks] = useState<CalEvent[] | null>(null);
   const [tasksErr, setTasksErr] = useState<ApiError | null>(null);
@@ -85,6 +86,8 @@ export default function Today({ active }: { active: boolean }) {
     } catch (e) { alert((e as Error).message); }
   }
 
+  const { rowRef, onKeyDown } = useListNav(tasks?.length ?? 0, vimNav);
+
   return (
     <>
       <h2>Today</h2>
@@ -106,8 +109,8 @@ export default function Today({ active }: { active: boolean }) {
             <div className="err small" style={{ marginTop: 6 }}>{addErr}</div>
             <ul className="list" style={{ marginTop: 12 }}>
               {tasks === null ? (tasksErr ? <ConnectBox provider="google" err={tasksErr} /> : null)
-                : tasks.length ? tasks.map((t) => (
-                  <li key={t.id}>
+                : tasks.length ? tasks.map((t, i) => (
+                  <li key={t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)}>
                     <input type="checkbox" checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
                     <span className={'grow' + (t.done ? ' done' : '')}>
                       {t.title}
