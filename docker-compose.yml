@@ -43,6 +43,6 @@ services:
     cpus: "0.25"
 
 volumes:
-  # auth.json (people, codes, permissions), tokens.json (Google/Spotify) and the notes.
+  # auth.json (people, codes, permissions), tokens.json (per-user Google/Spotify/Linear/GitHub) and the notes.
   dash_data:
     driver: local

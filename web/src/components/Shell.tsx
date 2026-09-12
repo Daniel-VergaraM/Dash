@@ -98,9 +98,6 @@ export default function Shell() {
 
   if (!me) return null;
 
-  // github comes from a token in .env, so it has no OAuth flow to start or revoke.
-  const manageable = (k: string) => can('connections:manage') && k !== 'github';
-
   async function disconnect(k: string) {
     if (!confirm(`Disconnect ${k}? Its panel stops working until you reconnect.`)) return;
     setConnBusy(k);
@@ -137,7 +134,7 @@ export default function Shell() {
           <span className="muted"> · via {me.via || 'code'}</span>
         </div>
         <div className="conn">
-          {Object.entries(me.connected).map(([k, v]) => manageable(k) ? (
+          {Object.entries(me.connected).map(([k, v]) => (
             <div key={k}>
               {v ? <b>●</b> : '○'}{' '}
               <a href={`/auth/${k}`} title={v ? `Reconnect ${k} (re-runs consent)` : undefined}>{k}</a>
@@ -148,8 +145,6 @@ export default function Shell() {
                 ><X size={11} /></button>
               )}
             </div>
-          ) : (
-            <div key={k}>{v ? <b>●</b> : '○'} {k}</div>
           ))}
         </div>
         <button id="logout" onClick={logout}><LogOut size={14} /> Sign out</button>

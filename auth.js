@@ -29,7 +29,6 @@ export const CAPABILITIES = {
   'github:read': 'See repositories and activity',
   'projects:read': 'See projects',
   'projects:write': 'Create, edit and delete projects',
-  'connections:manage': 'Connect and disconnect Google / Spotify',
   'users:manage': 'Manage people, passwords, devices and permissions',
 };
 
@@ -37,8 +36,10 @@ const ALL = Object.keys(CAPABILITIES);
 
 export const ROLES = {
   admin: ALL,
-  member: ALL.filter((c) => c !== 'users:manage'),
-  guest: ['tasks:read', 'calendar:read', 'notes:read', 'music:read', 'github:read', 'projects:read'],
+  // GitHub and Linear are admin-only by default — grant them to a specific person via a
+  // custom permission set in Access, rather than bundling them into every non-guest role.
+  member: ALL.filter((c) => !['users:manage', 'github:read', 'projects:read', 'projects:write'].includes(c)),
+  guest: ['tasks:read', 'calendar:read', 'notes:read', 'music:read'],
 };
 
 // An explicit permissions array overrides the role; otherwise the role's defaults apply.

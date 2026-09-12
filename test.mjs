@@ -66,8 +66,10 @@ assert.ok(ROLES.admin.includes('users:manage'));
 assert.ok(!ROLES.member.includes('users:manage'), 'members must not manage access');
 assert.ok(!ROLES.guest.some((c) => c.endsWith(':write') || c.endsWith(':manage')), 'guests are read-only');
 assert.equal(ROLES.admin.length, Object.keys(CAPABILITIES).length);
-assert.ok(ROLES.member.includes('projects:write'));
-assert.ok(ROLES.guest.includes('projects:read') && !ROLES.guest.includes('projects:write'));
+assert.ok(!ROLES.member.includes('projects:write') && !ROLES.member.includes('projects:read'), 'projects are admin-only by default');
+assert.ok(!ROLES.member.includes('github:read'), 'github is admin-only by default');
+assert.ok(!ROLES.guest.includes('projects:read') && !ROLES.guest.includes('github:read'));
+assert.deepEqual(capsOf({ role: 'admin', permissions: ['projects:read'] }), ['projects:read'], 'per-person override still grants an admin-only cap');
 
 assert.deepEqual(capsOf({ role: 'guest' }), ROLES.guest);
 assert.deepEqual(capsOf({ role: 'admin', permissions: ['notes:read'] }), ['notes:read'], 'override beats role');

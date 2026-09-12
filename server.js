@@ -23,12 +23,32 @@ const execFileP = promisify(execFile);
 const DIR = import.meta.dirname;
 const DATA = path.join(DIR, 'data');
 const NOTES = path.join(DATA, 'notes');
+const notesDir = (userId) => path.join(NOTES, userId);
 const TOKEN_FILE = path.join(DATA, 'tokens.json');
 const PORT = Number(process.env.PORT) || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 await fs.mkdir(NOTES, { recursive: true });
 await initAuth(DATA, process.env.ACCESS_PASSWORD);
+
+// One-time migration: notes used to be one flat shared folder. If any sit directly under
+// data/notes/ and there's exactly one account, they're unambiguously that person's — move
+// them into their own folder. With more than one account, don't guess whose they are.
+{
+  const flat = (await fs.readdir(NOTES)).filter((n) => n.endsWith('.md'));
+  if (flat.length) {
+    const people = listUsers();
+    if (people.length === 1) {
+      const dir = notesDir(people[0].id);
+      await fs.mkdir(dir, { recursive: true });
+      for (const n of flat) await fs.rename(path.join(NOTES, n), path.join(dir, n));
+      console.log(`[notes] migrated ${flat.length} note(s) from data/notes/ into ${people[0].name}'s folder`);
+    } else {
+      console.warn(`[notes] ${flat.length} note(s) sit directly under data/notes/ with ${people.length} accounts present — not migrating automatically; move them into data/notes/<userId>/ by hand.`);
+    }
+  }
+}
+
 await initTaskMeta(DATA);
 
 let tokens = JSON.parse(await fs.readFile(TOKEN_FILE, 'utf8').catch(() => '{}'));
@@ -76,15 +96,29 @@ const PROVIDERS = {
     id: 'LINEAR_CLIENT_ID',
     secret: 'LINEAR_CLIENT_SECRET',
   },
+  github: {
+    authUrl: 'https://github.com/login/oauth/authorize',
+    tokenUrl: 'https://github.com/login/oauth/access_token',
+    api: 'https://api.github.com',
+    // OAuth Apps only support classic scopes — no fine-grained equivalent to a PAT exists.
+    // `repo` (which also grants write) is the only way to read private repos via OAuth App.
+    scope: 'read:user repo',
+    extra: {},
+    id: 'GITHUB_CLIENT_ID',
+    secret: 'GITHUB_CLIENT_SECRET',
+  },
 };
 
 const redirectUri = (name) => `${BASE_URL}/auth/${name}/callback`;
 
-async function exchange(name, body) {
+async function exchange(userId, name, body) {
   const p = PROVIDERS[name];
   const res = await fetch(p.tokenUrl, {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      accept: 'application/json', // GitHub returns form-encoded without this; harmless elsewhere
+    },
     body: new URLSearchParams({
       client_id: process.env[p.id] || '',
       client_secret: process.env[p.secret] || '',
@@ -95,35 +129,42 @@ async function exchange(name, body) {
   const j = await res.json();
   if (!res.ok) throw fail(502, `${name} token exchange: ${j.error_description || j.error || res.status}`);
   // A refresh grant usually omits refresh_token — keep the one we already have.
-  tokens[name] = { ...tokens[name], ...j, expires_at: Date.now() + (j.expires_in - 60) * 1000 };
+  tokens[userId] ||= {};
+  tokens[userId][name] = {
+    ...tokens[userId][name],
+    ...j,
+    // GitHub OAuth Apps don't expire by default (no expires_in in the response) — Infinity
+    // makes that explicit rather than relying on Date.now() > NaN always being false.
+    expires_at: j.expires_in ? Date.now() + (j.expires_in - 60) * 1000 : Infinity,
+  };
   await saveTokens();
 }
 
 // Refreshes if needed and hands back a usable token, so the raw and JSON callers share
 // exactly one place that knows about expiry.
-async function accessToken(name) {
-  const t = tokens[name];
+async function accessToken(userId, name) {
+  const t = tokens[userId]?.[name];
   if (!t) throw fail(428, `${name} not connected`);
   if (Date.now() > t.expires_at) {
     if (!t.refresh_token) throw fail(428, `${name} session expired — reconnect`);
-    await exchange(name, { grant_type: 'refresh_token', refresh_token: t.refresh_token });
+    await exchange(userId, name, { grant_type: 'refresh_token', refresh_token: t.refresh_token });
   }
-  return tokens[name].access_token;
+  return tokens[userId][name].access_token;
 }
 
 // For bytes rather than JSON: returns the Response so the body can be streamed.
-async function apiRaw(name, pathq) {
-  const token = await accessToken(name);
+async function apiRaw(userId, name, pathq) {
+  const token = await accessToken(userId, name);
   const res = await fetch(PROVIDERS[name].api + pathq, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw fail(res.status, upstreamError(name, res.status, detail, pathq));
+    throw fail(res.status, upstreamError(userId, name, res.status, detail, pathq));
   }
   return res;
 }
 
-async function api(name, pathq, opts = {}) {
-  const token = await accessToken(name);
+async function api(userId, name, pathq, opts = {}) {
+  const token = await accessToken(userId, name);
   const res = await fetch(PROVIDERS[name].api + pathq, {
     ...opts,
     headers: {
@@ -134,18 +175,18 @@ async function api(name, pathq, opts = {}) {
   });
   if (res.status === 204) return {};
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw fail(res.status, upstreamError(name, res.status, j, pathq));
+  if (!res.ok) throw fail(res.status, upstreamError(userId, name, res.status, j, pathq));
   return j;
 }
 
 // A bare "403" is useless for telling apart "the token predates this scope" from "Spotify
 // will not serve this object". The provider's own message plus the scopes the stored token
 // actually carries answers that without guesswork.
-function upstreamError(name, status, body, pathq) {
+function upstreamError(userId, name, status, body, pathq) {
   const said = body.error?.message || body.error_description || body.error || `returned ${status}`;
   let msg = `${name}: ${said}`;
   if (status === 403 || status === 401) {
-    const granted = tokens[name]?.scope;
+    const granted = tokens[userId]?.[name]?.scope;
     msg += granted ? ` — token was granted: ${granted}` : ' — the stored token records no scopes';
   }
   console.error(`[${name}] ${status} on ${pathq.split('?')[0]} — ${said}`);
@@ -182,13 +223,25 @@ async function setSession(res, user, via, ip) {
   res.setHeader('set-cookie', `sid=${sid}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=604800`);
 }
 
+// Every connection is per-user: tokens are keyed by whoever connected them, so "connected"
+// always means "I connected my own account," never a shared/global state.
+function connectionState(userId) {
+  const t = tokens[userId] || {};
+  return {
+    connected: { google: !!t.google, spotify: !!t.spotify, linear: !!t.linear, github: !!t.github },
+    configured: {
+      google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID,
+      linear: !!process.env.LINEAR_CLIENT_ID, github: !!process.env.GITHUB_CLIENT_ID,
+    },
+  };
+}
+
 const me = (user, session) => ({
   auth: true,
   user: { id: user.id, name: user.name, role: user.role },
   caps: capsOf(user),
   via: session?.via,
-  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN, linear: !!tokens.linear },
-  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID, linear: !!process.env.LINEAR_CLIENT_ID },
+  ...connectionState(user.id),
 });
 
 const app = express();
@@ -456,14 +509,9 @@ app.delete('/api/access/users/:id', can('users:manage'), wrap(async (req) => {
   return { ok: true };
 }));
 
-/* ---------- provider connections ---------- */
+/* ---------- provider connections (always your own — no capability gate, like passkeys) ---------- */
 
-const status = () => ({
-  connected: { google: !!tokens.google, spotify: !!tokens.spotify, github: !!process.env.GITHUB_TOKEN, linear: !!tokens.linear },
-  configured: { google: !!process.env.GOOGLE_CLIENT_ID, spotify: !!process.env.SPOTIFY_CLIENT_ID, linear: !!process.env.LINEAR_CLIENT_ID },
-});
-
-app.get('/auth/:name', can('connections:manage'), (req, res) => {
+app.get('/auth/:name', (req, res) => {
   const p = PROVIDERS[req.params.name];
   if (!p) return res.status(404).send('unknown provider');
   if (!process.env[p.id]) return res.status(428).send(`${p.id} is not set in .env`);
@@ -477,19 +525,19 @@ app.get('/auth/:name', can('connections:manage'), (req, res) => {
   res.redirect(`${p.authUrl}?${q}`);
 });
 
-app.get('/auth/:name/callback', can('connections:manage'), wrap(async (req, res) => {
+app.get('/auth/:name/callback', wrap(async (req, res) => {
   if (!PROVIDERS[req.params.name]) throw fail(404, 'unknown provider');
   if (req.query.error) throw fail(400, String(req.query.error));
-  await exchange(req.params.name, { grant_type: 'authorization_code', code: String(req.query.code || '') });
+  await exchange(req.user.id, req.params.name, { grant_type: 'authorization_code', code: String(req.query.code || '') });
   await audit('provider-connected', { by: req.user.name, provider: req.params.name });
   res.redirect('/');
 }));
 
-app.post('/api/disconnect/:name', can('connections:manage'), wrap(async (req) => {
-  delete tokens[req.params.name];
+app.post('/api/disconnect/:name', wrap(async (req) => {
+  if (tokens[req.user.id]) delete tokens[req.user.id][req.params.name];
   await saveTokens();
   await audit('provider-disconnected', { by: req.user.name, provider: req.params.name });
-  return status();
+  return connectionState(req.user.id);
 }));
 
 /* ---------- Tasks + Calendar (tasks ARE calendar events) ---------- */
@@ -518,7 +566,7 @@ const cleanPriority = (raw) => (PRIORITIES.includes(raw) ? raw : undefined);
 
 // Shared by /api/events and the project-scoped task routes below, so the window/paging
 // query is built in exactly one place.
-async function fetchEventsWindow(days) {
+async function fetchEventsWindow(userId, days) {
   const from = new Date();
   from.setHours(0, 0, 0, 0);
   const clamped = Math.min(Math.max(Number(days) || 14, 1), 90);
@@ -529,12 +577,12 @@ async function fetchEventsWindow(days) {
     orderBy: 'startTime',
     maxResults: '250',
   });
-  const r = await api('google', eventsUrl(`?${q}`));
+  const r = await api(userId, 'google', eventsUrl(`?${q}`));
   return (r.items || []).map(shape);
 }
 
 app.get('/api/events', can('calendar:read', 'tasks:read'), wrap(async (req) => {
-  const items = await fetchEventsWindow(req.query.days || 14);
+  const items = await fetchEventsWindow(req.user.id, req.query.days || 14);
   if (req.query.tasks) return items.filter((i) => i.task);
   // Someone with tasks:read but not calendar:read sees only their tasks, never the diary.
   return allows(req.user, 'calendar:read') ? items : items.filter((i) => i.task);
@@ -550,7 +598,7 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   if (priority) priv.priority = priority;
   if (req.body?.project) priv.project = String(req.body.project).slice(0, 64);
 
-  return shape(await api('google', eventsUrl(), {
+  return shape(await api(req.user.id, 'google', eventsUrl(), {
     method: 'POST',
     body: JSON.stringify({
       summary: title,
@@ -577,7 +625,7 @@ app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
     // ponytail: one extra round-trip per private-field write, no lock against a
     // concurrent writer racing this read; acceptable at single-operator scale, same
     // risk profile as auth.json's non-atomic save().
-    const current = await api('google', eventsUrl(`/${id}`));
+    const current = await api(req.user.id, 'google', eventsUrl(`/${id}`));
     const priv = { ...TASK_FLAG, ...current.extendedProperties?.private };
 
     if (req.body.done !== undefined) priv.done = req.body.done ? '1' : '0';
@@ -598,11 +646,11 @@ app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
     Object.assign(body, { start: { dateTime: start }, end: { dateTime: end } });
   }
 
-  return shape(await api('google', eventsUrl(`/${id}`), { method: 'PATCH', body: JSON.stringify(body) }));
+  return shape(await api(req.user.id, 'google', eventsUrl(`/${id}`), { method: 'PATCH', body: JSON.stringify(body) }));
 }));
 
 app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
-  await api('google', eventsUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
+  await api(req.user.id, 'google', eventsUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
   await deleteSubtasksFor(req.params.id);
   return { ok: true };
 }));
@@ -611,8 +659,8 @@ app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
 
 // Linear's whole API is one GraphQL endpoint; errors come back as HTTP 200 with an
 // `errors` array, which api()'s res.ok check does not catch, so that's checked here.
-async function linear(query, variables) {
-  const j = await api('linear', '/graphql', { method: 'POST', body: JSON.stringify({ query, variables }) });
+async function linear(userId, query, variables) {
+  const j = await api(userId, 'linear', '/graphql', { method: 'POST', body: JSON.stringify({ query, variables }) });
   if (j.errors?.length) throw fail(400, j.errors.map((e) => e.message).join('; '));
   return j.data;
 }
@@ -624,14 +672,14 @@ const PROJECT_FIELDS = `
 `;
 
 app.get('/api/projects', can('projects:read'), wrap(async (req) => {
-  const data = await linear(`query { projects(first: 100, includeArchived: false, orderBy: updatedAt) { nodes { ${PROJECT_FIELDS} } } }`);
+  const data = await linear(req.user.id, `query { projects(first: 100, includeArchived: false, orderBy: updatedAt) { nodes { ${PROJECT_FIELDS} } } }`);
   const projects = data.projects.nodes;
   // Stats need a Calendar read, so they're opt-in (?stats=1) and only computed for
   // someone who actually holds tasks:read — projects:read alone doesn't imply it.
   if (!req.query.stats || !allows(req.user, 'tasks:read')) return projects;
 
   const counts = {};
-  for (const t of await fetchEventsWindow(90).catch(() => [])) {
+  for (const t of await fetchEventsWindow(req.user.id, 90).catch(() => [])) {
     if (!t.task || !t.project) continue;
     counts[t.project] ||= { total: 0, done: 0 };
     counts[t.project].total++;
@@ -653,6 +701,7 @@ app.post('/api/projects', can('projects:write'), wrap(async (req) => {
   if (req.body?.targetDate) input.targetDate = String(req.body.targetDate);
 
   const data = await linear(
+    req.user.id,
     `mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { success project { ${PROJECT_FIELDS} } } }`,
     { input },
   );
@@ -666,6 +715,7 @@ app.patch('/api/projects/:id', can('projects:write'), wrap(async (req) => {
     if (req.body?.[k] !== undefined) input[k] = req.body[k];
   }
   const data = await linear(
+    req.user.id,
     `mutation($id: String!, $input: ProjectUpdateInput!) { projectUpdate(id: $id, input: $input) { success project { ${PROJECT_FIELDS} } } }`,
     { id: req.params.id, input },
   );
@@ -674,23 +724,23 @@ app.patch('/api/projects/:id', can('projects:write'), wrap(async (req) => {
 }));
 
 app.delete('/api/projects/:id', can('projects:write'), wrap(async (req) => {
-  const data = await linear(`mutation($id: String!) { projectDelete(id: $id) { success } }`, { id: req.params.id });
+  const data = await linear(req.user.id, `mutation($id: String!) { projectDelete(id: $id) { success } }`, { id: req.params.id });
   if (!data.projectDelete.success) throw fail(502, 'Linear rejected the delete');
   return { ok: true };
 }));
 
 app.get('/api/projects/:id/tasks', can('tasks:read'), wrap(async (req) => {
-  const items = await fetchEventsWindow(req.query.days || 90);
+  const items = await fetchEventsWindow(req.user.id, req.query.days || 90);
   return items.filter((i) => i.task && i.project === req.params.id);
 }));
 
-app.get('/api/linear/teams', can('projects:read'), wrap(async () => {
-  const data = await linear(`query { teams(first: 100) { nodes { id name } } }`);
+app.get('/api/linear/teams', can('projects:read'), wrap(async (req) => {
+  const data = await linear(req.user.id, `query { teams(first: 100) { nodes { id name } } }`);
   return data.teams.nodes;
 }));
 
-app.get('/api/linear/statuses', can('projects:read'), wrap(async () => {
-  const data = await linear(`query { projectStatuses(first: 50) { nodes { id name type color } } }`);
+app.get('/api/linear/statuses', can('projects:read'), wrap(async (req) => {
+  const data = await linear(req.user.id, `query { projectStatuses(first: 50) { nodes { id name type color } } }`);
   return data.projectStatuses.nodes;
 }));
 
@@ -727,7 +777,7 @@ app.get('/api/drive', can('drive:read'), wrap(async (req) => {
         fields: FILE_FIELDS,
       });
 
-  const files = (await api('google', `/drive/v3/files?${q}`)).files || [];
+  const files = (await api(req.user.id, 'google', `/drive/v3/files?${q}`)).files || [];
   return {
     files: files.map((f) => ({ ...f, folder: f.mimeType === FOLDER })),
     folder: term ? null : folder,
@@ -748,13 +798,13 @@ const GOOGLE_EXPORT = {
 
 app.get('/api/drive/:id/preview', can('drive:read'), wrap(async (req, res) => {
   const id = encodeURIComponent(req.params.id);
-  const meta = await api('google', `/drive/v3/files/${id}?fields=name,mimeType`);
+  const meta = await api(req.user.id, 'google', `/drive/v3/files/${id}?fields=name,mimeType`);
 
   // Google-native docs have no bytes to download; they have to be exported to a real format.
   const exportAs = GOOGLE_EXPORT[meta.mimeType];
   const upstream = exportAs
-    ? await apiRaw('google', `/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(exportAs)}`)
-    : await apiRaw('google', `/drive/v3/files/${id}?alt=media`);
+    ? await apiRaw(req.user.id, 'google', `/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(exportAs)}`)
+    : await apiRaw(req.user.id, 'google', `/drive/v3/files/${id}?alt=media`);
 
   res.setHeader('content-type', exportAs || meta.mimeType || 'application/octet-stream');
   // inline, never attachment: this is a preview pane, not a download. The filename is quoted
@@ -769,50 +819,54 @@ app.get('/api/drive/:id/preview', can('drive:read'), wrap(async (req, res) => {
   await pipeline(Readable.fromWeb(upstream.body), res);
 }));
 
-/* ---------- Notes (markdown + latex, plain files on disk) ---------- */
+/* ---------- Notes (markdown + latex, plain files on disk — private per person) ---------- */
 
-app.get('/api/notes', can('notes:read'), wrap(async () => {
-  const names = (await fs.readdir(NOTES)).filter((n) => n.endsWith('.md'));
+app.get('/api/notes', can('notes:read'), wrap(async (req) => {
+  const dir = notesDir(req.user.id);
+  await fs.mkdir(dir, { recursive: true });
+  const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
   const stats = await Promise.all(names.map(async (name) => ({
     name,
-    modified: (await fs.stat(path.join(NOTES, name))).mtimeMs,
+    modified: (await fs.stat(path.join(dir, name))).mtimeMs,
   })));
   return stats.sort((a, b) => b.modified - a.modified);
 }));
 
 app.get('/api/notes/:name', can('notes:read'), wrap(async (req) => ({
   name: noteName(req.params.name),
-  body: await fs.readFile(path.join(NOTES, noteName(req.params.name)), 'utf8').catch(() => ''),
+  body: await fs.readFile(path.join(notesDir(req.user.id), noteName(req.params.name)), 'utf8').catch(() => ''),
 })));
 
 app.put('/api/notes/:name', can('notes:write'), wrap(async (req) => {
+  const dir = notesDir(req.user.id);
+  await fs.mkdir(dir, { recursive: true });
   const name = noteName(req.params.name);
-  await fs.writeFile(path.join(NOTES, name), String(req.body?.body ?? ''), 'utf8');
+  await fs.writeFile(path.join(dir, name), String(req.body?.body ?? ''), 'utf8');
   return { name, saved: Date.now() };
 }));
 
 app.delete('/api/notes/:name', can('notes:write'), wrap(async (req) => {
-  await fs.rm(path.join(NOTES, noteName(req.params.name)), { force: true });
+  await fs.rm(path.join(notesDir(req.user.id), noteName(req.params.name)), { force: true });
   return { ok: true };
 }));
 
 /* ---------- Spotify ---------- */
 
-app.get('/api/spotify', can('music:read'), wrap(async () => {
-  if (!tokens.spotify) throw fail(428, 'spotify not connected'); // the catches below must not hide this
+app.get('/api/spotify', can('music:read'), wrap(async (req) => {
+  if (!tokens[req.user.id]?.spotify) throw fail(428, 'spotify not connected'); // the catches below must not hide this
   const [now, recent] = await Promise.all([
-    api('spotify', '/v1/me/player/currently-playing').catch(() => ({})),
-    api('spotify', '/v1/me/player/recently-played?limit=12').catch(() => ({ items: [] })),
+    api(req.user.id, 'spotify', '/v1/me/player/currently-playing').catch(() => ({})),
+    api(req.user.id, 'spotify', '/v1/me/player/recently-played?limit=12').catch(() => ({ items: [] })),
   ]);
   return { now, recent: recent.items || [] };
 }));
 
-app.get('/api/spotify/playlists', can('music:read'), wrap(async () => {
+app.get('/api/spotify/playlists', can('music:read'), wrap(async (req) => {
   // Knowing who we are is what tells an owned playlist from a followed one. If this call is
   // refused we simply cannot mark ownership, which is a worse hint but not an error.
   const [r, self] = await Promise.all([
-    api('spotify', '/v1/me/playlists?limit=50'),
-    api('spotify', '/v1/me').catch(() => ({})),
+    api(req.user.id, 'spotify', '/v1/me/playlists?limit=50'),
+    api(req.user.id, 'spotify', '/v1/me').catch(() => ({})),
   ]);
   return (r.items || []).map((p) => ({
     id: p.id,
@@ -840,7 +894,7 @@ app.get('/api/spotify/playlists/:id', can('music:read'), wrap(async (req) => {
   // Spotify signals the refusal two different ways depending on the playlist: a 403, or a 200
   // with the `items` field simply absent. Both mean "not yours", which is a permission answer
   // rather than a failure, and reads very differently to the person looking at it.
-  const page = await api('spotify', `/v1/playlists/${id}/items?limit=100`)
+  const page = await api(req.user.id, 'spotify', `/v1/playlists/${id}/items?limit=100`)
     .catch((e) => { if (e.status === 403) return {}; throw e; });
 
   if (!page.items) return { id: req.params.id, tracks: [], readable: false };
@@ -872,7 +926,7 @@ app.put('/api/spotify/play', can('music:control'), wrap(async (req) => {
     ? { context_uri: context, offset: { uri } }
     : { uris: [uri] };
 
-  await api('spotify', '/v1/me/player/play', { method: 'PUT', body: JSON.stringify(body) });
+  await api(req.user.id, 'spotify', '/v1/me/player/play', { method: 'PUT', body: JSON.stringify(body) });
   return { ok: true };
 }));
 
@@ -886,34 +940,21 @@ const CONTROLS = {
 app.post('/api/spotify/:cmd', can('music:control'), wrap(async (req) => {
   const c = CONTROLS[req.params.cmd];
   if (!c) throw fail(400, 'unknown command');
-  await api('spotify', c[1], { method: c[0] });
+  await api(req.user.id, 'spotify', c[1], { method: c[0] });
   return { ok: true };
 }));
 
-/* ---------- GitHub (PAT — no OAuth dance needed for a personal dashboard) ---------- */
-
-async function gh(p) {
-  if (!process.env.GITHUB_TOKEN) throw fail(428, 'GITHUB_TOKEN not set in .env');
-  const res = await fetch('https://api.github.com' + p, {
-    headers: {
-      authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'dash',
-    },
-  });
-  const j = await res.json();
-  if (!res.ok) throw fail(res.status, j.message || `github ${res.status}`);
-  return j;
-}
+/* ---------- GitHub (per-user OAuth App connection) ---------- */
 
 const EVENT_TYPES = ['PushEvent', 'PullRequestEvent', 'IssuesEvent', 'CreateEvent', 'ReleaseEvent'];
 
-app.get('/api/github', can('github:read'), wrap(async () => {
-  const user = await gh('/user');
+app.get('/api/github', can('github:read'), wrap(async (req) => {
+  const uid = req.user.id;
+  const user = await api(uid, 'github', '/user');
   const [repos, events, prs] = await Promise.all([
-    gh('/user/repos?sort=pushed&per_page=10&affiliation=owner,collaborator'),
-    gh(`/users/${user.login}/events?per_page=30`),
-    gh(`/search/issues?q=${encodeURIComponent(`is:open is:pr author:${user.login}`)}&per_page=10`),
+    api(uid, 'github', '/user/repos?sort=pushed&per_page=10&affiliation=owner,collaborator'),
+    api(uid, 'github', `/users/${user.login}/events?per_page=30`),
+    api(uid, 'github', `/search/issues?q=${encodeURIComponent(`is:open is:pr author:${user.login}`)}&per_page=10`),
   ]);
   return {
     user: { login: user.login, avatar: user.avatar_url, url: user.html_url },

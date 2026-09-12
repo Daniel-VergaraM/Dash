@@ -14,8 +14,11 @@ npm start              # http://localhost:3000
 - **Tasks are calendar events.** A task is a Google Calendar event tagged
   `extendedProperties.private.dash=task`. That is the whole "sync" — no local task table, no
   reconciliation, no drift. Ticking a task sets `done=1` on the same event.
-- **Notes are `.md` files** in `data/notes/`. Edit them here or in any editor.
-- **Tokens** live in `data/tokens.json`. Delete it to disconnect everything.
+- **Notes are `.md` files** in `data/notes/<userId>/` — one private folder per person. Edit
+  them here or in any editor.
+- **Tokens** live in `data/tokens.json`, keyed by user id: each person's Google/Spotify/Linear/
+  GitHub connection is their own. Delete the file to disconnect everyone; delete one person's
+  entry to disconnect just them.
 
 Nothing else is persisted, so `data/` is the entire backup surface.
 
@@ -63,19 +66,20 @@ cosmetic; the server checks every request regardless.**
 |---|---|
 | `tasks:read` / `tasks:write` | see tasks / create, complete and delete them |
 | `calendar:read` | see the full agenda (without it, only your tasks are visible) |
-| `notes:read` / `notes:write` | read notes / edit and delete them |
-| `drive:read` | browse and preview Drive files |
+| `notes:read` / `notes:write` | read your own notes / edit and delete them |
+| `drive:read` | browse and preview your own Drive files |
 | `music:read` / `music:control` | see what is playing / control playback |
-| `github:read` | repositories, PRs and activity |
-| `connections:manage` | connect and disconnect Google / Spotify |
+| `github:read` | your repositories, PRs and activity — admin-only by default |
+| `projects:read` / `projects:write` | see / create, edit and delete Linear projects — admin-only by default |
 | `users:manage` | the Access panel itself |
 
-Managing your own password and passkeys needs no capability — those routes only ever touch
-the caller's own credentials.
+Managing your own password, passkeys, and Google/Spotify/Linear/GitHub connections needs no
+capability — those routes only ever touch the caller's own credentials and accounts.
 
-Three roles bundle these — **admin** (everything), **member** (everything but `users:manage`),
-**guest** (read-only) — and any person can instead be given an explicit custom set that
-overrides their role.
+Three roles bundle these — **admin** (everything), **member** (everything except managing people
+and, by default, GitHub/Linear — grant those to a specific person from Access), **guest**
+(read-only, and without GitHub/Linear at all by default) — and any person can instead be given an
+explicit custom set that overrides their role.
 
 Two things are structurally impossible: removing the last person who can manage access, and
 removing your own `users:manage` while standing in the panel. Sign-ins, failures and every
@@ -114,13 +118,17 @@ client from `X-Forwarded-For`, trusting the header only from private hops. Left 
 header is ignored entirely, which is why it must stay blank when nothing sits in front.
 
 Register `https://dash.dvergaram.is-local.org/auth/google/callback`, `/auth/spotify/callback`,
-and `/auth/linear/callback` as the redirect URIs in the Google, Spotify, and Linear consoles.
+`/auth/linear/callback`, and `/auth/github/callback` as the redirect URIs in the Google, Spotify,
+Linear, and GitHub consoles.
 
 ## Connecting the services
 
-`GITHUB_TOKEN` is read from `.env` at startup. Google, Spotify, and Linear use OAuth: sign in,
+Google, Spotify, Linear, and GitHub all use OAuth, and every connection is your own: sign in,
 then click the greyed-out provider in the sidebar (or hit `/auth/google`, `/auth/spotify`,
-`/auth/linear`). Refresh tokens are handled automatically.
+`/auth/linear`, `/auth/github`). Refresh tokens are handled automatically where the provider
+issues them (GitHub OAuth Apps don't expire by default, so there's nothing to refresh there).
+There is no shared connection — if you haven't connected a service yourself, you see a "Connect"
+prompt, never someone else's data.
 
 Google scopes: `calendar` (read/write, for tasks) and `drive.readonly`.
 
@@ -159,8 +167,8 @@ to playlists you own or collaborate on: for anyone else's, Spotify returns the m
 | `PATCH·DELETE /api/projects/:id` | edit / soft-delete (trash) a Linear project |
 | `GET /api/projects/:id/tasks` | this app's tasks tagged with that Linear project |
 | `GET /api/linear/teams`, `GET /api/linear/statuses` | pickers for the project create/edit form |
-| `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | markdown files |
-| `GET /api/drive?folder=&q=` | browse a folder, or search everywhere |
+| `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | your own markdown files |
+| `GET /api/drive?folder=&q=` | browse a folder, or search everywhere, in your own Drive |
 | `GET /api/drive/:id/preview` | streams the file from our own origin |
 | `GET /api/spotify`, `POST /api/spotify/:play\|pause\|next\|previous` | |
 | `GET /api/spotify/playlists[/:id]` | your playlists and their tracks |
@@ -181,8 +189,9 @@ restarts, and migration from the old 6-digit codes).
 
 - No task table, no sync engine — Google Calendar *is* the store.
 - No month grid; the calendar is a grouped agenda list. Add a grid if you actually miss it.
-- One Google account and one Spotify account for everyone — the connection is shared, the
-  permission to use it is per person. Per-person Google accounts would need a token per user.
+- No shared connections. Google, Spotify, Linear, and GitHub are each person's own account —
+  this used to be one shared account per service for everyone, deliberately reversed so every
+  person's calendar, notes, playback, and repos are actually theirs.
 - Sign-in cost is O(people): scrypt runs once per person until the code matches. Fine below
   ~50 people; prefix codes with a person id if this ever hosts a crowd.
 - No password reset flow. An admin sets a new one from the Access panel; with no admin left,

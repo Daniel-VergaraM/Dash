@@ -2,7 +2,7 @@ export type Capability =
   | 'tasks:read' | 'tasks:write' | 'calendar:read' | 'notes:read' | 'notes:write'
   | 'drive:read' | 'music:read' | 'music:control' | 'github:read'
   | 'projects:read' | 'projects:write'
-  | 'connections:manage' | 'users:manage';
+  | 'users:manage';
 
 export type Role = 'admin' | 'member' | 'guest';
 
@@ -12,7 +12,7 @@ export interface Me {
   caps: Capability[];
   via?: string;
   connected: Record<'google' | 'spotify' | 'github' | 'linear', boolean>;
-  configured: Record<'google' | 'spotify' | 'linear', boolean>;
+  configured: Record<'google' | 'spotify' | 'linear' | 'github', boolean>;
 }
 
 export interface ApiError extends Error {
