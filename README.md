@@ -22,7 +22,7 @@ npm start              # http://localhost:3000
 
 Nothing else is persisted, so `data/` is the entire backup surface.
 
-## Authentication and authorisation
+## Authentication and authorization
 
 People, passwords, passkeys, devices, permissions and sessions live in `data/auth.json`,
 managed from the **Access** panel (everyone else's) and the **Account** page (your own).
@@ -58,7 +58,7 @@ versa. Everyone keeps a password as well — an account is never allowed to end 
 
 ### What people can do
 
-Authorisation is a flat capability list. Every protected route names the capability it needs,
+Authorization is a flat capability list. Every protected route names the capability it needs,
 and the same list drives the UI — controls you cannot use are not drawn. **The UI hiding is
 cosmetic; the server checks every request regardless.**
 
