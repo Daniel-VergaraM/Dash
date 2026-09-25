@@ -23,19 +23,50 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
     return () => clearTimeout(t);
   }, [body]);
 
+  // What the server last confirmed for `current`. Comparing against it is what stops the
+  // autosave from firing on a freshly opened note, or re-writing an unchanged one.
+  const savedRef = useRef('');
+
+  const write = useCallback(async (name: string, text: string) => {
+    await jf('/api/notes/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ body: text }) });
+    savedRef.current = text;
+    setStatus(name + ' · saved ' + new Date().toLocaleTimeString());
+    listNotes();
+  }, [listNotes]);
+
   const openNote = useCallback(async (name: string) => {
+    // Switching away cancels the pending autosave, so anything still unsaved has to go now
+    // or it is lost silently.
+    if (current && current !== name && body !== savedRef.current) await write(current, body);
     const n = await jf<{ name: string; body: string }>('/api/notes/' + encodeURIComponent(name));
     setCurrent(n.name);
     setBody(n.body);
+    savedRef.current = n.body;
     setStatus(n.name);
-  }, []);
+  }, [current, body, write]);
 
   const saveNote = useCallback(async () => {
     if (!current) return;
-    await jf('/api/notes/' + encodeURIComponent(current), { method: 'PUT', body: JSON.stringify({ body }) });
-    setStatus(current + ' · saved ' + new Date().toLocaleTimeString());
-    listNotes();
-  }, [current, body, listNotes]);
+    await write(current, body);
+  }, [current, body, write]);
+
+  const dirty = !!current && body !== savedRef.current;
+
+  // Autosave: 5s after the last keystroke. Every edit re-runs this effect, and the cleanup
+  // cancels the previous timer, so the clock restarts while you are still typing.
+  useEffect(() => {
+    if (!dirty) return;
+    const t = setTimeout(() => { saveNote(); }, 5000);
+    return () => clearTimeout(t);
+  }, [body, dirty, saveNote]);
+
+  // Closing the tab inside the 5s window would drop the edit without this.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    addEventListener('beforeunload', warn);
+    return () => removeEventListener('beforeunload', warn);
+  }, [dirty]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -76,7 +107,7 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
 
   return (
     <>
-      <h2>Notes <span className="muted small">markdown + $\LaTeX$ &mdash; Ctrl+S saves</span></h2>
+      <h2>Notes <span className="muted small">markdown + $\LaTeX$ &mdash; autosaves 5s after you stop typing, or Ctrl+S</span></h2>
       <div id="notesWrap">
         <div>
           <button className="primary" style={{ width: '100%', marginBottom: 8 }} onClick={newNote}>+ New note</button>
@@ -108,7 +139,7 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
         </div>
       </div>
       <div className="row small muted" style={{ marginTop: 8 }}>
-        <span>{status}</span>
+        <span>{dirty ? current + ' · unsaved…' : status}</span>
         <button style={{ marginLeft: 'auto' }} onClick={delNote}>Delete note</button>
       </div>
     </>
