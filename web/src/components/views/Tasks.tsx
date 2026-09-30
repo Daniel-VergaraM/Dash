@@ -32,7 +32,7 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
   const [addErr, setAddErr] = useState('');
 
   const loadTasks = useCallback(async () => {
-    try { setTasks(await jf<CalEvent[]>('/api/events?days=90&tasks=1')); setTasksErr(null); }
+    try { setTasks(await jf<CalEvent[]>('/api/tasks')); setTasksErr(null); }
     catch (e) { setTasksErr(e as ApiError); }
   }, []);
   const loadProjects = useCallback(async () => {
@@ -41,7 +41,26 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
     catch (e) { setProjectsErr(e as ApiError); }
   }, [can]);
 
-  useEffect(() => { if (active) { loadTasks(); loadProjects(); } }, [active, loadTasks, loadProjects]);
+  // Tasks used to be calendar events. Any left over from before the move to Google Tasks
+  // are invisible to the new list, so offer to pull them across once.
+  const [legacy, setLegacy] = useState(0);
+  const [migrating, setMigrating] = useState(false);
+
+  const loadLegacy = useCallback(async () => {
+    try { setLegacy((await jf<{ count: number }>('/api/tasks/legacy')).count); }
+    catch { setLegacy(0); }
+  }, []);
+
+  useEffect(() => {
+    if (active) { loadTasks(); loadProjects(); loadLegacy(); }
+  }, [active, loadTasks, loadProjects, loadLegacy]);
+
+  async function migrateLegacy() {
+    setMigrating(true);
+    try { await jf('/api/tasks/migrate', { method: 'POST' }); await loadTasks(); await loadLegacy(); }
+    catch (e) { setAddErr((e as Error).message); }
+    finally { setMigrating(false); }
+  }
 
   async function addTask() {
     setAddErr('');
@@ -134,6 +153,19 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
             <button onClick={() => setShowProjects(true)}>Manage projects</button>
           </div>
         )
+      )}
+
+      {legacy > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <b>{legacy} task{legacy === 1 ? '' : 's'} still stored the old way</b>
+          <div className="muted small" style={{ margin: '4px 0 10px' }}>
+            They were calendar events. Moving them makes them real Google Tasks and removes the
+            calendar entries. Times are kept; the old subtask checklists are not.
+          </div>
+          <button className="primary" onClick={migrateLegacy} disabled={migrating}>
+            {migrating ? 'Moving…' : 'Move them to Google Tasks'}
+          </button>
+        </div>
       )}
 
       <div className="grid">

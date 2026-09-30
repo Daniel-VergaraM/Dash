@@ -28,7 +28,7 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
   const [addErr, setAddErr] = useState('');
 
   const loadTasks = useCallback(async () => {
-    try { setTasks(await jf<CalEvent[]>('/api/events?days=30&tasks=1')); setTasksErr(null); }
+    try { setTasks(await jf<CalEvent[]>('/api/tasks')); setTasksErr(null); }
     catch (e) { setTasksErr(e as ApiError); }
   }, []);
 

@@ -35,6 +35,12 @@ export interface CalEvent {
   done: boolean;
   priority: Priority | null;
   project: string | null;
+  // Tasks only: the Linear issue this task created, when it was filed under a project.
+  linearUrl?: string | null;
+  linearKey?: string | null;
+  completedAt?: string | null;
+  // Set when the task saved but its Linear side did not.
+  warning?: string | null;
 }
 
 export interface LinearTeam { id: string; name: string; }

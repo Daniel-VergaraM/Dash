@@ -13,7 +13,7 @@ import {
   audit, readAudit, lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
-import { initTaskMeta, subtasksOf, setSubtasks, deleteSubtasksFor } from './task-meta.js';
+import { initTaskMeta, subtasksOf, setSubtasks, metaOf, setMeta, deleteMeta } from './task-meta.js';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
   generateAuthenticationOptions, verifyAuthenticationResponse,
@@ -68,7 +68,13 @@ const PROVIDERS = {
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
     api: 'https://www.googleapis.com',
-    scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive.readonly',
+    // Adding a scope invalidates nothing, but the STORED token keeps the scopes it was
+    // granted — Google must be reconnected once after this line changes or the Tasks calls 403.
+    scope: [
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/drive.readonly',
+      'https://www.googleapis.com/auth/tasks',
+    ].join(' '),
     extra: { access_type: 'offline', prompt: 'consent' },
     id: 'GOOGLE_CLIENT_ID',
     secret: 'GOOGLE_CLIENT_SECRET',
@@ -165,7 +171,10 @@ async function apiRaw(userId, name, pathq) {
 
 async function api(userId, name, pathq, opts = {}) {
   const token = await accessToken(userId, name);
-  const res = await fetch(PROVIDERS[name].api + pathq, {
+  // Google Tasks lives on tasks.googleapis.com, not the www.googleapis.com base the other
+  // Google calls share, so an absolute URL is passed through untouched.
+  const url = pathq.startsWith('https://') ? pathq : PROVIDERS[name].api + pathq;
+  const res = await fetch(url, {
     ...opts,
     headers: {
       authorization: `Bearer ${token}`,
@@ -548,12 +557,10 @@ app.post('/api/disconnect/:name', wrap(async (req) => {
   return connectionState(req.user.id);
 }));
 
-/* ---------- Tasks + Calendar (tasks ARE calendar events) ---------- */
+/* ---------- Calendar events (tasks are NOT events any more — see Tasks below) ---------- */
 
 const CAL = () => encodeURIComponent(process.env.CALENDAR_ID || 'primary');
 const eventsUrl = (suffix = '') => `/calendar/v3/calendars/${CAL()}/events${suffix}`;
-const TASK_FLAG = { dash: 'task' };
-
 const shape = (e) => ({
   id: e.id,
   title: e.summary || '(no title)',
@@ -563,14 +570,13 @@ const shape = (e) => ({
   allDay: !e.start?.dateTime,
   link: e.htmlLink,
   location: e.location || '',
+  // Only still read so the one-shot migration can find tasks created before the move
+  // to Google Tasks; nothing writes these any more.
   task: e.extendedProperties?.private?.dash === 'task',
   done: e.extendedProperties?.private?.done === '1',
   priority: e.extendedProperties?.private?.priority || null,
   project: e.extendedProperties?.private?.project || null,
 });
-
-const PRIORITIES = ['low', 'med', 'high'];
-const cleanPriority = (raw) => (PRIORITIES.includes(raw) ? raw : undefined);
 
 // Shared by /api/events and the project-scoped task routes below, so the window/paging
 // query is built in exactly one place.
@@ -595,71 +601,218 @@ app.get('/api/events', can('calendar:read', 'tasks:read'), wrap(async (req) => {
   return allows(req.user, 'calendar:read') ? items : items.filter((i) => i.task);
 }));
 
+/* ---------- Tasks (Google Tasks + a Linear issue, NOT calendar events) ---------- */
+
+// Google Tasks lives on a different host from every other Google call, and the default list
+// is the one Calendar shows in its Tasks pane.
+const TASKS_LIST = () => encodeURIComponent(process.env.TASKS_LIST_ID || '@default');
+const tasksUrl = (suffix = '') =>
+  `https://tasks.googleapis.com/tasks/v1/lists/${TASKS_LIST()}/tasks${suffix}`;
+
+// Completed tasks stay listed this long so ticking one does not make it vanish mid-glance.
+const DONE_GRACE_MS = 7 * 864e5;
+
+// `due` keeps only the date — the API discards the time of day — so the time lives in the
+// local meta store and is recombined here.
+function shapeTask(t, meta = {}) {
+  const day = t.due ? t.due.slice(0, 10) : null;
+  const start = day ? (meta.time ? `${day}T${meta.time}:00` : day) : null;
+  return {
+    id: t.id,
+    title: t.title || '(no title)',
+    notes: t.notes || '',
+    start,
+    end: start,
+    allDay: !meta.time,
+    link: '',
+    location: '',
+    task: true,
+    done: t.status === 'completed',
+    completedAt: t.completed || null,
+    priority: meta.priority || null,
+    project: meta.project || null,
+    linearUrl: meta.linearUrl || null,
+    linearKey: meta.linearKey || null,
+  };
+}
+
+// The API wants an RFC 3339 timestamp but only reads the date out of it.
+function dueFrom(startInput, tz) {
+  if (!startInput) return undefined;
+  const { start } = taskWindow(startInput, 30, tz);
+  return start.slice(0, 10) + 'T00:00:00.000Z';
+}
+
+// The stored HH:MM has to be the wall clock the person typed, which the raw input already
+// carries; taskWindow's output is UTC and would drift by the offset.
+const timeFrom = (startInput) => {
+  const m = String(startInput ?? '').match(/T(\d{2}:\d{2})/);
+  return m ? m[1] : null;
+};
+
+/* --- Linear: one issue per task, in the selected project --- */
+
+// Issues need a team and a project can span several, so the first one is used.
+async function linearIssueFor(userId, projectId, { title, notes, due }) {
+  const data = await linear(userId, `query($id: String!) {
+    project(id: $id) { id teams(first: 1) { nodes { id } } }
+  }`, { id: projectId });
+
+  const teamId = data.project?.teams?.nodes?.[0]?.id;
+  if (!teamId) throw fail(400, 'that Linear project has no team to file an issue under');
+
+  const res = await linear(userId, `mutation($input: IssueCreateInput!) {
+    issueCreate(input: $input) { success issue { id identifier url } }
+  }`, {
+    input: {
+      title,
+      description: notes || undefined,
+      teamId,
+      projectId,
+      dueDate: due ? due.slice(0, 10) : undefined,
+    },
+  });
+
+  if (!res.issueCreate?.success) throw fail(502, 'Linear rejected the issue');
+  return res.issueCreate.issue;
+}
+
+async function linearSetIssueDone(userId, issueId, done) {
+  // Linear has no boolean "done": an issue moves to a workflow state, and which state counts
+  // as finished is defined per team, so the team's states have to be read first.
+  const data = await linear(userId, `query($id: String!) {
+    issue(id: $id) { id team { id states(first: 50) { nodes { id type position } } } }
+  }`, { id: issueId });
+
+  const states = data.issue?.team?.states?.nodes || [];
+  const want = done ? 'completed' : 'unstarted';
+  const target = states.filter((s) => s.type === want).sort((a, b) => a.position - b.position)[0]
+    || states.find((s) => s.type === (done ? 'canceled' : 'backlog'));
+  if (!target) return;
+
+  await linear(userId, `mutation($id: String!, $stateId: String!) {
+    issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+  }`, { id: issueId, stateId: target.id });
+}
+
+/* --- routes --- */
+
+app.get('/api/tasks', can('tasks:read', 'tasks:write'), wrap(async (req) => {
+  const q = new URLSearchParams({ maxResults: '100', showCompleted: 'true', showHidden: 'true' });
+  const r = await api(req.user.id, 'google', tasksUrl(`?${q}`));
+  const cutoff = Date.now() - DONE_GRACE_MS;
+
+  return (r.items || [])
+    // An incomplete task stays listed however old its due date is — that is what "shown
+    // until completed" means. Only finished ones age out.
+    .filter((t) => t.status !== 'completed' || (t.completed && Date.parse(t.completed) > cutoff))
+    .map((t) => shapeTask(t, metaOf(t.id)))
+    .sort((a, b) => Number(a.done) - Number(b.done) || (a.start || '9999').localeCompare(b.start || '9999'));
+}));
+
 app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   const title = String(req.body?.title || '').trim();
   if (!title) throw fail(400, 'title required');
-  const { start, end } = taskWindow(req.body?.start, req.body?.minutes, req.user.timezone);
+  const notes = String(req.body?.notes || '');
+  const due = dueFrom(req.body?.start, req.user.timezone);
 
-  const priv = { ...TASK_FLAG };
-  const priority = cleanPriority(req.body?.priority);
-  if (priority) priv.priority = priority;
-  if (req.body?.project) priv.project = String(req.body.project).slice(0, 64);
-
-  return shape(await api(req.user.id, 'google', eventsUrl(), {
+  const created = await api(req.user.id, 'google', tasksUrl(), {
     method: 'POST',
-    body: JSON.stringify({
-      summary: title,
-      description: String(req.body?.notes || ''),
-      start: { dateTime: start },
-      end: { dateTime: end },
-      extendedProperties: { private: priv },
-      reminders: { useDefault: true },
-    }),
-  }));
+    body: JSON.stringify({ title, notes, due, status: 'needsAction' }),
+  });
+
+  const meta = {
+    time: timeFrom(req.body?.start),
+    minutes: req.body?.minutes,
+    priority: req.body?.priority,
+    project: req.body?.project || null,
+  };
+
+  // The Google task already exists, so a Linear failure must not lose it: the issue is
+  // best-effort and its error rides back with the created task.
+  let warning = null;
+  if (req.body?.project) {
+    try {
+      const issue = await linearIssueFor(req.user.id, String(req.body.project), { title, notes, due });
+      Object.assign(meta, { linearId: issue.id, linearUrl: issue.url, linearKey: issue.identifier });
+    } catch (e) {
+      warning = `Task created, but Linear did not: ${e.message}`;
+    }
+  }
+
+  const saved = await setMeta(created.id, meta);
+  return { ...shapeTask(created, saved), warning };
 }));
 
 app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
   const id = encodeURIComponent(req.params.id);
   const body = {};
 
-  const touchesPrivate = req.body?.done !== undefined
-    || req.body?.priority !== undefined
-    || req.body?.project !== undefined;
-
-  if (touchesPrivate) {
-    // Google's PATCH replaces extendedProperties.private wholesale rather than merging
-    // keys — every field that should survive has to be read first and re-sent whole.
-    // ponytail: one extra round-trip per private-field write, no lock against a
-    // concurrent writer racing this read; acceptable at single-operator scale, same
-    // risk profile as auth.json's non-atomic save().
-    const current = await api(req.user.id, 'google', eventsUrl(`/${id}`));
-    const priv = { ...TASK_FLAG, ...current.extendedProperties?.private };
-
-    if (req.body.done !== undefined) priv.done = req.body.done ? '1' : '0';
-    if (req.body.priority !== undefined) {
-      const p = cleanPriority(req.body.priority);
-      if (p) priv.priority = p; else delete priv.priority;
-    }
-    if (req.body.project !== undefined) {
-      if (req.body.project) priv.project = String(req.body.project).slice(0, 64);
-      else delete priv.project;
-    }
-    body.extendedProperties = { private: priv };
+  if (req.body?.title) body.title = String(req.body.title);
+  if (req.body?.notes !== undefined) body.notes = String(req.body.notes);
+  if (req.body?.start) body.due = dueFrom(req.body.start, req.user.timezone);
+  if (req.body?.done !== undefined) {
+    body.status = req.body.done ? 'completed' : 'needsAction';
+    // Reopening needs `completed` cleared too, or the task keeps its completion timestamp.
+    if (!req.body.done) body.completed = null;
   }
 
-  if (req.body?.title) body.summary = String(req.body.title);
-  if (req.body?.start) {
-    const { start, end } = taskWindow(req.body.start, req.body.minutes, req.user.timezone);
-    Object.assign(body, { start: { dateTime: start }, end: { dateTime: end } });
+  const updated = Object.keys(body).length
+    ? await api(req.user.id, 'google', tasksUrl(`/${id}`), { method: 'PATCH', body: JSON.stringify(body) })
+    : await api(req.user.id, 'google', tasksUrl(`/${id}`));
+
+  const patch = {};
+  if (req.body?.start) patch.time = timeFrom(req.body.start);
+  if (req.body?.minutes !== undefined) patch.minutes = req.body.minutes;
+  if (req.body?.priority !== undefined) patch.priority = req.body.priority || null;
+  if (req.body?.project !== undefined) patch.project = req.body.project || null;
+  const meta = Object.keys(patch).length ? await setMeta(req.params.id, patch) : metaOf(req.params.id);
+
+  let warning = null;
+  if (req.body?.done !== undefined && meta.linearId) {
+    try { await linearSetIssueDone(req.user.id, meta.linearId, !!req.body.done); }
+    catch (e) { warning = `Task updated, but its Linear issue did not: ${e.message}`; }
   }
 
-  return shape(await api(req.user.id, 'google', eventsUrl(`/${id}`), { method: 'PATCH', body: JSON.stringify(body) }));
+  return { ...shapeTask(updated, meta), warning };
 }));
 
 app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
-  await api(req.user.id, 'google', eventsUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
-  await deleteSubtasksFor(req.params.id);
+  await api(req.user.id, 'google', tasksUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
+  // The Linear issue is left alone on purpose: deleting tracked work from a shared tracker
+  // because someone tidied their own list is not a call this app should make.
+  await deleteMeta(req.params.id);
   return { ok: true };
+}));
+
+// How many pre-migration tasks are still sitting in the calendar. Drives the one-time
+// prompt in the Tasks view; returns 0 forever once they have been moved.
+app.get('/api/tasks/legacy', can('tasks:read', 'tasks:write'), wrap(async (req) => ({
+  count: (await fetchEventsWindow(req.user.id, 90)).filter((e) => e.task && !e.done).length,
+})));
+
+// One-shot rescue for tasks created before this became Google Tasks: they were calendar
+// events tagged dash=task and would otherwise be stranded in the diary.
+app.post('/api/tasks/migrate', can('tasks:write'), wrap(async (req) => {
+  const legacy = (await fetchEventsWindow(req.user.id, 90)).filter((e) => e.task && !e.done);
+  let moved = 0;
+  for (const e of legacy) {
+    const created = await api(req.user.id, 'google', tasksUrl(), {
+      method: 'POST',
+      body: JSON.stringify({
+        title: e.title,
+        notes: e.notes,
+        due: e.start ? e.start.slice(0, 10) + 'T00:00:00.000Z' : undefined,
+        status: 'needsAction',
+      }),
+    });
+    await setMeta(created.id, { time: timeFrom(e.start), priority: e.priority, project: e.project });
+    await api(req.user.id, 'google', eventsUrl(`/${encodeURIComponent(e.id)}`), { method: 'DELETE' });
+    await deleteMeta(e.id);
+    moved += 1;
+  }
+  await audit('tasks-migrated', { by: req.user.name, moved });
+  return { moved };
 }));
 
 /* ---------- Projects (Linear — NOT a local store, NOT Calendar-backed) ---------- */
