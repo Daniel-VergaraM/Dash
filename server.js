@@ -532,11 +532,17 @@ app.get('/auth/:name', (req, res) => {
   const p = PROVIDERS[req.params.name];
   if (!p) return res.status(404).send('unknown provider');
   if (!process.env[p.id]) return res.status(428).send(`${p.id} is not set in .env`);
+  // Binds the callback to the session that started this flow, so a code an attacker got
+  // for their own account can't be replayed into a victim's session (OAuth CSRF).
+  const state = crypto.randomBytes(16).toString('hex');
+  const secure = BASE_URL.startsWith('https') ? ' Secure;' : '';
+  res.setHeader('set-cookie', `oas=${state}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=300`);
   const q = new URLSearchParams({
     client_id: process.env[p.id],
     redirect_uri: redirectUri(req.params.name),
     response_type: 'code',
     scope: p.scope,
+    state,
     ...p.extra,
   });
   res.redirect(`${p.authUrl}?${q}`);
@@ -544,6 +550,9 @@ app.get('/auth/:name', (req, res) => {
 
 app.get('/auth/:name/callback', wrap(async (req, res) => {
   if (!PROVIDERS[req.params.name]) throw fail(404, 'unknown provider');
+  const cookieState = (req.headers.cookie || '').match(/(?:^|;\s*)oas=([a-f0-9]{32})/)?.[1];
+  res.setHeader('set-cookie', 'oas=; HttpOnly; Path=/; Max-Age=0'); // single use either way
+  if (!cookieState || cookieState !== req.query.state) throw fail(400, 'state mismatch — try connecting again');
   if (req.query.error) throw fail(400, String(req.query.error));
   await exchange(req.user.id, req.params.name, { grant_type: 'authorization_code', code: String(req.query.code || '') });
   await audit('provider-connected', { by: req.user.name, provider: req.params.name });
