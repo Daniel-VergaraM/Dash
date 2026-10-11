@@ -72,13 +72,42 @@ export interface Subtask {
 }
 
 export interface NoteMeta {
+  // Path relative to the notes root, e.g. "proj/ideas.md"; flat notes have folder "".
   name: string;
+  folder: string;
   modified: number;
+  tags: string[];
+  // Only on searches (?q=): text around the first body hit.
+  snippet?: string;
 }
 
-export interface NoteBody {
+export interface NoteDoc {
   name: string;
   body: string;
+  tags: string[];
+  // Paths of the notes that link here with [[...]].
+  backlinks: string[];
+}
+
+/** @deprecated use NoteDoc */
+export type NoteBody = NoteDoc;
+
+export interface NotifySettings {
+  enabled: boolean;
+  // "HH:MM" local time, or null when the daily digest is off.
+  digestAt: string | null;
+  // Minutes before a timed event/task that the reminder fires (5..120).
+  leadMin: number;
+}
+
+export interface AppNotification {
+  id: string;
+  key: string;
+  kind: 'reminder' | 'digest';
+  title: string;
+  body: string;
+  at: string;
+  read: boolean;
 }
 
 export interface DriveFile {
@@ -172,4 +201,10 @@ export interface SearchResults {
   files: { id: string; name: string; webViewLink?: string; folder: boolean }[];
   repos: { name: string; url: string }[];
   prs: { title: string; url: string; repo: string }[];
+}
+
+export interface NotificationsPayload {
+  settings: NotifySettings;
+  unread: number;
+  items: AppNotification[];
 }

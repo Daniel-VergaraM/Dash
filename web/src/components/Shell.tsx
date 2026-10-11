@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Home, Inbox as InboxIcon, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X,
+  Home, Inbox as InboxIcon, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X, Bell,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import type { Capability, ViewName } from '../types';
 import { jf } from '../lib/api';
 import { getKbdMode, setKbdMode as persistKbdMode, getVimNav, setVimNav as persistVimNav } from '../lib/kbdMode';
 import { isTypingTarget } from '../lib/kbd';
+import { useNotifications } from '../lib/useNotifications';
 import CommandPalette from './CommandPalette';
+import NotificationsPanel from './NotificationsPanel';
 import Today from './views/Today';
 import Inbox from './views/Inbox';
 import Tasks from './views/Tasks';
@@ -42,6 +44,10 @@ export default function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [taskReq, setTaskReq] = useState<{ id: string } | null>(null);
   const [noteReq, setNoteReq] = useState<{ name: string } | null>(null);
+  const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef<HTMLButtonElement>(null);
+  const canNotify = can('calendar:read') || can('tasks:read') || can('tasks:write');
+  const notifs = useNotifications(!!me && canNotify);
   const navRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [navFocusIdx, setNavFocusIdx] = useState(0);
 
@@ -115,6 +121,8 @@ export default function Shell() {
     }
   }
 
+  const closeBell = useCallback(() => { setBellOpen(false); bellRef.current?.focus(); }, []);
+
   if (!me) return null;
 
   async function disconnect(k: string) {
@@ -135,6 +143,25 @@ export default function Shell() {
         <div className="brand" title="Press g then a letter to jump to a view (e.g. g t for Today)">
           <span className="mark" />DASH
         </div>
+        {canNotify && (
+          <div className="bellwrap">
+            <button
+              ref={bellRef} className="navbtn bell" aria-haspopup="dialog" aria-expanded={bellOpen}
+              aria-label={`Notifications${notifs.data?.unread ? `, ${notifs.data.unread} unread` : ''}`}
+              onClick={() => setBellOpen((o) => !o)}
+            >
+              <Bell size={16} /> Alerts
+              {!!notifs.data?.unread && <span className="badge" aria-hidden="true">{notifs.data.unread > 99 ? '99+' : notifs.data.unread}</span>}
+            </button>
+            {bellOpen && (
+              <NotificationsPanel
+                items={notifs.data?.items ?? []} unread={notifs.data?.unread ?? 0}
+                onMarkRead={(id) => notifs.markRead([id])} onMarkAll={() => notifs.markRead()}
+                onClose={closeBell}
+              />
+            )}
+          </div>
+        )}
         {items.map(({ view: v, label, icon: Icon }, i) => (
           <button
             key={v} ref={(el) => { navRefs.current[i] = el; }}

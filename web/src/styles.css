@@ -222,3 +222,40 @@ button.danger:hover { border-color: var(--bad); background: rgba(255,123,114,.08
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* notifications */
+nav .bellwrap { position: relative; display: flex; flex-direction: column; }
+nav button.bell { position: relative; }
+.badge { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 10px; text-align: center;
+  background: var(--accent); color: var(--bg); font-size: 11px; font-weight: 700; line-height: 16px; }
+.notifpanel { position: fixed; top: 56px; left: 208px; z-index: 40; width: min(360px, calc(100vw - 16px));
+  max-height: 70vh; overflow: auto; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; }
+.notifpanel:focus { outline: none; }
+.notifitem { background: none; border: none; text-align: left; padding: 0; color: var(--fg); }
+.notifpanel li.read .notifitem { color: var(--dim); }
+.notifpanel li.unread { box-shadow: inset 2px 0 0 var(--accent); padding-left: 8px; }
+
+/* notes: search, folders, tags, backlinks */
+#noteSearch { width: 100%; margin-bottom: 8px; }
+.tagchips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.tagchip { font-size: 11px; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--line);
+  background: none; color: var(--dim); }
+.tagchip:hover { color: var(--fg); }
+.tagchip.on { color: var(--accent); border-color: var(--accent-dim); background: rgba(110,168,254,.1); }
+.folder { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--accent);
+  padding: 8px 9px 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#noteList .snippet { display: block; font-size: 11px; opacity: .75; overflow: hidden; text-overflow: ellipsis; }
+.previewCol { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.previewCol #preview { flex: 1; min-height: 0; }
+#backlinks { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 14px; max-height: 120px; overflow: auto; font-size: 12px; display: flex; flex-wrap: wrap;
+  gap: 6px 10px; align-items: center; }
+#backlinks b { color: var(--dim); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; }
+#backlinks button { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; }
+#preview a { color: var(--accent); }
+
+@media (max-width: 800px) {
+  .notifpanel { top: 60px; left: 8px; right: 8px; width: auto; }
+  nav .bellwrap { flex: none; }
+}

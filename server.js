@@ -7,8 +7,10 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import {
-  noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
+  notePath, parseNote, backlinksOf, rewriteLinks, filterNotes,
+  macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches,
   prioFromLinear, linearLink, issuePatch, ymd, inboxScore, inboxOrder,
+  localNow, hmToMin, cleanNotify, dueReminders, digestDue, digestItem,
 } from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
@@ -17,6 +19,10 @@ import {
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
 } from './auth.js';
 import { initTaskMeta, subtasksOf, setSubtasks, metaOf, setMeta, deleteMeta } from './task-meta.js';
+import {
+  initNotify, getSettings, setSettings, feedOf, unreadOf, markRead, push,
+  digestDateOf, setDigestDate,
+} from './notify.js';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
   generateAuthenticationOptions, verifyAuthenticationResponse,
@@ -53,6 +59,7 @@ await initAuth(DATA, process.env.ACCESS_PASSWORD);
 }
 
 await initTaskMeta(DATA);
+await initNotify(DATA);
 
 let tokens = JSON.parse(await fs.readFile(TOKEN_FILE, 'utf8').catch(() => '{}'));
 const saveTokens = () => fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2));
@@ -1049,32 +1056,128 @@ app.get('/api/drive/:id/preview', can('drive:read'), wrap(async (req, res) => {
 
 /* ---------- Notes (markdown + latex, plain files on disk — private per person) ---------- */
 
+// A note's identity is its path relative to the person's notes dir ("proj/ideas.md").
+// notePath() has already vetted the string; the resolve check is the second lock.
+function noteFile(uid, rel) {
+  const dir = path.resolve(notesDir(uid));
+  const abs = path.resolve(dir, rel);
+  if (!abs.startsWith(dir + path.sep)) throw fail(400, 'bad note name');
+  return abs;
+}
+
+// In-memory index per person: rel -> {mtimeMs, size, body, tags, links}. Every request
+// re-validates it with readdir+stat and re-reads only files whose mtime or size moved, so
+// edits made outside the app (sync, git) show up without a watcher.
+// ponytail: whole bodies held in RAM and a full stat walk per request — fine to ~2000 notes;
+// beyond that use fs.watch or a persisted index.
+const noteIdx = new Map();
+const NOTE_DEPTH = 3; // folders, same ceiling as notePath
+
+async function noteIndex(uid) {
+  const root = notesDir(uid);
+  await fs.mkdir(root, { recursive: true });
+  if (!noteIdx.has(uid)) noteIdx.set(uid, new Map());
+  const idx = noteIdx.get(uid);
+  const seen = new Set();
+  const walk = async (rel, depth) => {
+    const ents = await fs.readdir(path.join(root, rel), { withFileTypes: true }).catch(() => []);
+    await Promise.all(ents.map(async (e) => {
+      if (e.isSymbolicLink()) return;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (depth < NOTE_DEPTH) await walk(r, depth + 1); return; }
+      if (!e.isFile()) return;
+      try { notePath(r); } catch { return; } // names the API could never address
+      const st = await fs.stat(path.join(root, r)).catch(() => null);
+      if (!st) return;
+      seen.add(r);
+      const old = idx.get(r);
+      if (old && old.mtimeMs === st.mtimeMs && old.size === st.size) return;
+      const body = await fs.readFile(path.join(root, r), 'utf8').catch(() => '');
+      idx.set(r, { mtimeMs: st.mtimeMs, size: st.size, body, ...parseNote(body) });
+    }));
+  };
+  await walk('', 0);
+  for (const k of idx.keys()) if (!seen.has(k)) idx.delete(k);
+  return [...idx].map(([rel, v]) => ({ rel, ...v }));
+}
+
+// After a write, refresh just that entry instead of waiting for the next walk.
+async function indexNote(uid, rel, body) {
+  const st = await fs.stat(noteFile(uid, rel));
+  noteIdx.get(uid)?.set(rel, { mtimeMs: st.mtimeMs, size: st.size, body, ...parseNote(body) });
+}
+
+// Folders exist only while they hold notes; remove emptied ones, innermost first.
+async function pruneFolders(uid, rel) {
+  const root = path.resolve(notesDir(uid));
+  let dir = path.dirname(noteFile(uid, rel));
+  while (dir.startsWith(root + path.sep)) {
+    if (!(await fs.rmdir(dir).then(() => true, () => false))) break;
+    dir = path.dirname(dir);
+  }
+}
+
 app.get('/api/notes', can('notes:read'), wrap(async (req) => {
-  const dir = notesDir(req.user.id);
-  await fs.mkdir(dir, { recursive: true });
-  const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
-  const stats = await Promise.all(names.map(async (name) => ({
-    name,
-    modified: (await fs.stat(path.join(dir, name))).mtimeMs,
-  })));
-  return stats.sort((a, b) => b.modified - a.modified);
+  const { q = '', tag = '', folder = '' } = req.query;
+  const filtered = !!(q || tag || folder);
+  return filterNotes(await noteIndex(req.user.id), { q: String(q), tag: String(tag), folder: String(folder) }, filtered ? 200 : Infinity);
 }));
 
-app.get('/api/notes/:name', can('notes:read'), wrap(async (req) => ({
-  name: noteName(req.params.name),
-  body: await fs.readFile(path.join(notesDir(req.user.id), noteName(req.params.name)), 'utf8').catch(() => ''),
-})));
+// Registered before the wildcard so "rename" can never be read as a note path.
+app.post('/api/notes/rename', can('notes:write'), wrap(async (req) => {
+  const uid = req.user.id;
+  const from = notePath(req.body?.from);
+  const to = notePath(req.body?.to);
+  const src = noteFile(uid, from);
+  const dst = noteFile(uid, to);
+  if (from === to) return { name: to, rewritten: 0 };
+  const entries = await noteIndex(uid);
+  if (!entries.some((e) => e.rel === from)) throw fail(404, 'note not found');
+  if (await fs.stat(dst).then(() => true, () => false)) throw fail(409, 'a note or folder with that name already exists');
+  await fs.mkdir(path.dirname(dst), { recursive: true });
+  await fs.rename(src, dst);
+  noteIdx.get(uid)?.delete(from);
 
-app.put('/api/notes/:name', can('notes:write'), wrap(async (req) => {
-  const dir = notesDir(req.user.id);
-  await fs.mkdir(dir, { recursive: true });
-  const name = noteName(req.params.name);
-  await fs.writeFile(path.join(dir, name), String(req.body?.body ?? ''), 'utf8');
+  // Links in every note (the moved one included) that pointed at `from` follow it.
+  const paths = entries.map((e) => e.rel);
+  let rewritten = 0;
+  for (const e of entries) {
+    if (!e.body.includes('[[')) continue;
+    const { body, n } = rewriteLinks(e.body, from, to, paths, e.rel);
+    if (!n) continue;
+    const at = e.rel === from ? to : e.rel;
+    await fs.writeFile(noteFile(uid, at), body, 'utf8');
+    await indexNote(uid, at, body);
+    rewritten++;
+  }
+  if (!noteIdx.get(uid)?.has(to)) await indexNote(uid, to, entries.find((e) => e.rel === from).body);
+  await pruneFolders(uid, from);
+  return { name: to, rewritten };
+}));
+
+app.get('/api/notes/*', can('notes:read'), wrap(async (req) => {
+  const name = notePath(req.params[0]);
+  const body = await fs.readFile(noteFile(req.user.id, name), 'utf8').catch(() => '');
+  const entries = await noteIndex(req.user.id);
+  return { name, body, tags: parseNote(body).tags, backlinks: backlinksOf(entries, name) };
+}));
+
+app.put('/api/notes/*', can('notes:write'), wrap(async (req) => {
+  const name = notePath(req.params[0]);
+  const abs = noteFile(req.user.id, name);
+  const body = String(req.body?.body ?? '');
+  if ((await fs.stat(abs).catch(() => null))?.isDirectory()) throw fail(409, 'a folder with that name already exists');
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  await fs.writeFile(abs, body, 'utf8');
+  await indexNote(req.user.id, name, body);
   return { name, saved: Date.now() };
 }));
 
-app.delete('/api/notes/:name', can('notes:write'), wrap(async (req) => {
-  await fs.rm(path.join(notesDir(req.user.id), noteName(req.params.name)), { force: true });
+app.delete('/api/notes/*', can('notes:write'), wrap(async (req) => {
+  const name = notePath(req.params[0]);
+  await fs.rm(noteFile(req.user.id, name), { force: true });
+  noteIdx.get(req.user.id)?.delete(name);
+  await pruneFolders(req.user.id, name);
   return { ok: true };
 }));
 
@@ -1224,17 +1327,17 @@ app.get('/api/search', wrap(async (req) => {
       const all = await memo(`tasks:${uid}`, 60_000, () => listTasks(uid));
       out.tasks = top(all.filter((t) => matches(t.title, q)).map((t) => ({ id: t.id, title: t.title, start: t.start, done: t.done })));
     },
-    // ponytail: reads every note on each search — O(n) files; add an index if someone has >1000.
     notes: async () => {
-      const dir = notesDir(uid);
-      const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
-      const hits = await Promise.all(names.map(async (name) => {
-        const body = await fs.readFile(path.join(dir, name), 'utf8').catch(() => '');
-        if (!matches(name, q) && !matches(body, q)) return null;
-        // Only a snippet ever leaves the server, never the whole note.
-        return { name, snippet: snippet(body, q) ?? body.slice(0, 80).replace(/\s+/g, ' ').trim() };
-      }));
-      out.notes = top(hits.filter(Boolean));
+      const entries = await noteIndex(uid);
+      const bodyOf = new Map(entries.map((e) => [e.rel, e.body]));
+      const term = q.replace(/^#/, '');
+      // Only a hint ever leaves the server, never the whole note.
+      out.notes = top(filterNotes(entries, { q }).map((r) => ({
+        name: r.name,
+        snippet: r.snippet
+          ?? (r.tags.find((t) => matches(t, term)) ? `#${r.tags.find((t) => matches(t, term))}` : null)
+          ?? bodyOf.get(r.name).slice(0, 80).replace(/\s+/g, ' ').trim(),
+      })));
     },
     drive: async () => {
       const term = driveTerm(q);
@@ -1337,9 +1440,82 @@ app.get('/api/inbox', can('tasks:read', 'tasks:write'), wrap(async (req) => {
   return memo(key, 60_000, () => buildInbox(req.user));
 }));
 
+/* ---------- Notifications (in-app feed; the browser polls, nothing is pushed) ---------- */
+
+const NOTIFY_CAPS = ['calendar:read', 'tasks:read', 'tasks:write'];
+
+app.get('/api/notifications', can(...NOTIFY_CAPS), wrap((req) => ({
+  settings: getSettings(req.user.id),
+  unread: unreadOf(req.user.id),
+  items: feedOf(req.user.id),
+})));
+
+app.post('/api/notifications/read', can(...NOTIFY_CAPS), wrap(async (req) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((i) => typeof i === 'string') : [];
+  return { unread: await markRead(req.user.id, ids) };
+}));
+
+app.put('/api/notifications/settings', can(...NOTIFY_CAPS), wrap((req) =>
+  setSettings(req.user.id, cleanNotify(req.body))));
+
+// "Delivering" a notification means adding it to the feed. One pass per minute walks the
+// people who opted in and have Google connected; each is isolated so one bad token cannot
+// starve the rest, and a failing person is skipped for 5 minutes (428 = simply not
+// connected, which is not worth retrying or logging).
+const failUntil = new Map();
+let ticking = false;
+
+async function notifyUser(u, now) {
+  const uid = u.id;
+  const s = getSettings(uid);
+  const tz = u.timezone || undefined;
+  const events = allows(u, 'calendar:read')
+    ? await memo(`events:2:${uid}`, 120_000, () => fetchEventsWindow(uid, 2)) : [];
+  const tasks = allows(u, 'tasks:read', 'tasks:write')
+    ? await memo(`tasks:${uid}`, 120_000, () => listTasks(uid)) : [];
+
+  for (const r of dueReminders({ events, tasks, now, leadMin: s.leadMin, tz })) await push(uid, r, now);
+
+  const lastDigestDate = digestDateOf(uid);
+  if (digestDue({ settings: s, now, tz, lastDigestDate })) {
+    const inbox = await memo(`inbox:${uid}`, 60_000, () => buildInbox(u));
+    await push(uid, digestItem({ events, inboxItems: inbox.items, tz, now }), now);
+    await setDigestDate(uid, localNow(tz, now).date);
+  } else {
+    // Past the 6 h window (server was down, or just enabled late): skip today, do not
+    // send a "morning" digest in the evening.
+    const at = hmToMin(s.digestAt);
+    const l = localNow(tz, now);
+    if (at !== null && l.date !== lastDigestDate && l.min >= at + 360) await setDigestDate(uid, l.date);
+  }
+}
+
+async function tick() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    const now = new Date();
+    for (const u of listUsers()) {
+      if (!getSettings(u.id).enabled || !tokens[u.id]?.google || !allows(u, ...NOTIFY_CAPS)) continue;
+      if ((failUntil.get(u.id) || 0) > now.getTime()) continue;
+      try {
+        await notifyUser(u, now);
+      } catch (e) {
+        if (e.status === 428) continue;
+        failUntil.set(u.id, now.getTime() + 5 * 60_000);
+        console.warn(`[notify] ${u.name}: ${e.message}`);
+      }
+    }
+  } finally {
+    ticking = false;
+  }
+}
+
 app.use(express.static(path.join(DIR, 'public')));
 
 // Behind a proxy, bind to loopback (HOST=127.0.0.1) so the port cannot be reached directly —
 // otherwise :3000 is a way in that skips nginx and its rate limit entirely.
 const HOST = process.env.HOST || '0.0.0.0';
 const srv = app.listen(PORT, HOST, () => console.log(`dash listening on ${HOST}:${srv.address().port} (${BASE_URL})`));
+setTimeout(tick, 15_000).unref();
+setInterval(tick, 60_000).unref();

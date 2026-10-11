@@ -177,7 +177,12 @@ to playlists you own or collaborate on: for anyone else's, Spotify returns the m
 | `PATCH·DELETE /api/projects/:id` | edit / soft-delete (trash) a Linear project |
 | `GET /api/projects/:id/tasks` | this app's tasks tagged with that Linear project |
 | `GET /api/linear/teams`, `GET /api/linear/statuses` | pickers for the project create/edit form |
-| `GET /api/notes`, `GET·PUT·DELETE /api/notes/:name` | your own markdown files |
+| `GET /api/notes?q=&tag=&folder=` | your markdown files; `q` searches names and bodies by relevance |
+| `GET·PUT·DELETE /api/notes/<folder/>name` | one note; `GET` also returns `tags` and `backlinks` |
+| `POST /api/notes/rename` | `{from, to}` — moves a note and rewrites `[[links]]` to it; `404`/`409` on missing/taken |
+| `GET /api/notifications` | `{settings, unread, items}` — the in-app feed (reminders and the daily digest) |
+| `POST /api/notifications/read` | `{ids?}` — mark some, or with none all, as read |
+| `PUT /api/notifications/settings` | `{enabled, digestAt, leadMin}` |
 | `GET /api/drive?folder=&q=` | browse a folder, or search everywhere, in your own Drive |
 | `GET /api/drive/:id/preview` | streams the file from our own origin |
 | `GET /api/spotify`, `POST /api/spotify/:play\|pause\|next\|previous` | |
@@ -194,6 +199,20 @@ to playlists you own or collaborate on: for anyone else's, Spotify returns the m
 password hashing, role and capability resolution, passkey storage, and the store end to end
 (sessions, suspension, the last-admin guard, rollback on a rejected edit, persistence across
 restarts, and migration from the old 6-digit codes).
+
+## Notifications and notes
+
+**Notifications.** The bell in the sidebar lists reminders (a few minutes before a timed event or
+task) and an optional daily digest. Alerts are in-app, plus the browser Notification API once you
+press "Enable browser alerts" in Account; there is no push, so they only fire while a tab is open
+(it polls every minute while visible). Lead time, digest time and the on/off switch live in
+Account. Needs `calendar:read`, `tasks:read` or `tasks:write`.
+
+**Notes.** Notes are plain `.md` files and may live in folders: name a note `folder/name`. Tags
+are `#tags` in the text or `tags:` in YAML frontmatter, and filter the list. `[[other note]]`
+(also `[[note|alias]]`, `[[note#section]]`) links notes and feeds each note's Backlinks panel.
+The search box matches names and bodies. Rename / move rewrites the `[[links]]` that pointed at
+the old name.
 
 ## Deliberately left out
 

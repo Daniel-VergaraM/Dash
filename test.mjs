@@ -5,7 +5,13 @@ import path from 'node:path';
 import {
   noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
   prioToLinear, prioFromLinear, inboxScore, inboxOrder, issuePatch, linearLink,
+  notePath, parseNote, resolveLink, backlinksOf, rewriteLinks, filterNotes,
+  localNow, cleanNotify, dueReminders, digestDue, digestItem,
 } from './lib.js';
+import {
+  initNotify, getSettings, setSettings, feedOf, unreadOf, markRead, push,
+  sentHas, sentAdd, pruneSent, digestDateOf, setDigestDate,
+} from './notify.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, capsOf, allows, validPassword, normalizeMac, cleanName,
   cleanPermissions, cleanTimezone, hashPassword, verifyPassword, initAuth, createUser, updateUser,
@@ -326,6 +332,183 @@ assert.deepEqual(srcs('guest'), ['tasks', 'notes']);
 assert.deepEqual(srcs('member'), ['tasks', 'notes', 'drive']);
 assert.deepEqual(srcs('admin'), ['tasks', 'notes', 'drive', 'github']);
 
+/* ---------- notes: paths, tags, links ---------- */
+
+for (const ok of ['a.md', 'proj/ideas.md', 'a b/c (2).md', 'a/b/c/d.md']) assert.equal(notePath(ok), ok);
+for (const bad of ['../x.md', 'a/../b.md', '/etc/x.md', 'a\\b.md', '.h/x.md', 'a//b.md', 'a/b/c/d/e.md', 'x', './x.md', 'a/.md', '']) {
+  assert.throws(() => notePath(bad), /bad note name/, `should reject ${bad}`);
+}
+assert.equal(noteName('proj/ideas.md'), 'ideas.md', 'noteName is unchanged');
+
+assert.deepEqual(parseNote('# Title\nsome #Alpha and #beta/sub text #alpha\n').tags, ['alpha', 'beta/sub']);
+assert.deepEqual(parseNote('x\n```\n#in-block\n```\nand `#inline` and $a_#b$ and $$\n#c\n$$ and http://x.y/p#frag').tags, []);
+assert.deepEqual(parseNote('---\ntags: [A, "b c"]\n---\nbody #z').tags, ['a', 'b c', 'z']);
+assert.deepEqual(parseNote('---\ntags: one, Two\n---\n').tags, ['one', 'two']);
+assert.deepEqual(parseNote('---\ntitle: x\ntags:\n  - L1\n  - #l2\nother: 1\n---\n').tags, ['l1', 'l2']);
+assert.deepEqual(parseNote('see [[Foo]], [[dir/Bar|alias]] and [[Foo#sec]] [[Baz.md]]').links, ['Foo', 'dir/Bar', 'Baz']);
+
+const paths = ['Foo.md', 'proj/Foo.md', 'proj/Bar.md', 'misc/baz.md'];
+assert.equal(resolveLink('proj/Foo', paths), 'proj/Foo.md', 'exact path wins');
+assert.equal(resolveLink('Foo', paths), 'Foo.md', 'alphabetical first basename');
+assert.equal(resolveLink('Foo', paths, 'proj/Bar.md'), 'Foo.md', 'a root note is an exact path, so it wins');
+assert.equal(resolveLink('Bar', ['x/Bar.md', 'proj/Bar.md']), 'proj/Bar.md');
+assert.equal(resolveLink('Bar', ['x/Bar.md', 'proj/Bar.md'], 'x/Q.md'), 'x/Bar.md', 'same folder breaks the tie');
+assert.equal(resolveLink('BAZ', paths), 'misc/baz.md', 'case-insensitive basename');
+assert.equal(resolveLink('nope', paths), null);
+const ents = [
+  { rel: 'Foo.md', links: [] }, { rel: 'proj/Bar.md', links: ['Foo', 'misc/baz'] },
+  { rel: 'misc/baz.md', links: ['proj/Foo'] }, { rel: 'proj/Foo.md', links: ['Foo'] },
+];
+assert.deepEqual(backlinksOf(ents, 'Foo.md').sort(), ['proj/Bar.md', 'proj/Foo.md'], 'bare [[Foo]] resolves to the root note');
+assert.deepEqual(backlinksOf(ents, 'proj/Foo.md'), ['misc/baz.md']);
+assert.deepEqual(backlinksOf(ents, 'misc/baz.md'), ['proj/Bar.md']);
+
+const rw = (body, from, to) => rewriteLinks(body, from, to, ['a.md', 'x/old.md', 'y/other.md'], 'y/other.md');
+assert.deepEqual(rw('[[old|al]] [[x/old#sec]] [[x/old.md|z]] [[other]]', 'x/old.md', 'x/new.md'),
+  { body: '[[new|al]] [[x/new#sec]] [[x/new.md|z]] [[other]]', n: 3 });
+assert.deepEqual(rw('[[old]] [[x/old]]', 'x/old.md', 'z/old.md'),
+  { body: '[[old]] [[z/old]]', n: 1 }, 'folder move leaves [[basename]] alone');
+assert.equal(rw('nothing [[a]]', 'x/old.md', 'x/new.md').n, 0);
+
+const nentries = [
+  { rel: 'a.md', mtimeMs: 1, tags: ['x'], body: 'hello world' },
+  { rel: 'proj/hello.md', mtimeMs: 2, tags: ['y', 'x/sub'], body: 'nothing' },
+  { rel: 'proj/z.md', mtimeMs: 3, tags: [], body: 'say Hello there' },
+];
+assert.deepEqual(filterNotes(nentries).map((n) => n.name), ['proj/z.md', 'proj/hello.md', 'a.md']);
+assert.deepEqual(filterNotes(nentries, { q: 'hello' }).map((n) => n.name), ['proj/hello.md', 'proj/z.md', 'a.md'], 'name hits first');
+assert.equal(filterNotes(nentries, { q: 'hello' })[1].snippet, 'say Hello there');
+assert.deepEqual(filterNotes(nentries, { q: 'y' }).map((n) => n.name), ['proj/z.md', 'proj/hello.md'], 'body hit, then tag-only hit');
+assert.deepEqual(filterNotes(nentries, { q: '#x' }).map((n) => n.name), ['proj/hello.md', 'a.md'], '#tag filter, incl. nested');
+assert.deepEqual(filterNotes(nentries, { tag: 'y' }).map((n) => n.name), ['proj/hello.md']);
+assert.deepEqual(filterNotes(nentries, { folder: 'proj' }).map((n) => n.folder), ['proj', 'proj']);
+assert.equal(filterNotes(Array.from({ length: 300 }, (_, i) => ({ rel: `n${i}.md`, mtimeMs: i, tags: [], body: '' }))).length, 200);
+assert.equal(filterNotes(nentries, {}, Infinity).length, 3);
+
+/* ---------- reminders + digest ---------- */
+
+const inst = new Date('2026-03-10T23:30:00Z');
+assert.deepEqual(localNow('Asia/Tokyo', inst), { date: '2026-03-11', min: 8 * 60 + 30 });
+assert.deepEqual(localNow('America/Mexico_City', inst), { date: '2026-03-10', min: 17 * 60 + 30 });
+assert.deepEqual(localNow('UTC', new Date('2026-03-10T00:05:00Z')), { date: '2026-03-10', min: 5 }, 'midnight is hour 0, not 24');
+
+assert.deepEqual(cleanNotify({ enabled: true, digestAt: '07:45', leadMin: 15 }), { enabled: true, digestAt: '07:45', leadMin: 15 });
+assert.deepEqual(cleanNotify({ enabled: 'yes', digestAt: '24:00', leadMin: 999 }), { enabled: false, digestAt: null, leadMin: 120 });
+assert.equal(cleanNotify({ digestAt: '7:5' }).digestAt, null);
+assert.equal(cleanNotify({ leadMin: 1 }).leadMin, 5);
+assert.equal(cleanNotify({}).leadMin, 10);
+assert.equal(cleanNotify(null).enabled, false);
+
+const R0 = new Date('2026-05-10T12:00:00Z');
+const ev = (id, start, extra = {}) => ({ id, title: id, start, allDay: false, task: false, done: false, ...extra });
+const rem = (o) => dueReminders({ now: R0, leadMin: 10, ...o });
+assert.deepEqual(rem({ events: [ev('in', '2026-05-10T12:07:00Z')] }).map((r) => r.key), ['ev:in:2026-05-10T12:07:00Z']);
+assert.deepEqual(rem({ events: [ev('edge', '2026-05-10T12:10:00Z')] }).length, 1, 'lead window is inclusive');
+assert.deepEqual(rem({ events: [ev('far', '2026-05-10T12:11:00Z'), ev('past', '2026-05-10T11:59:00Z'), ev('now', '2026-05-10T12:00:00Z')] }), []);
+assert.deepEqual(rem({ events: [ev('ad', '2026-05-10', { allDay: true })] }), [], 'all-day events have no point reminder');
+assert.deepEqual(rem({ events: [ev('in', '2026-05-10T12:07:00Z')], sent: { 'ev:in:2026-05-10T12:07:00Z': 'x' } }), [], 'already sent');
+assert.equal(rem({ events: [ev('in', '2026-05-10T12:09:00Z')], sent: { 'ev:in:2026-05-10T12:07:00Z': 'x' } }).length, 1, 'moved event is announced again');
+const tk = { id: 't1', title: 'T', start: '2026-05-10T14:05:00', allDay: false, done: false };
+assert.equal(rem({ tasks: [tk], tz: 'Europe/Madrid' })[0].key, 'tk:t1:2026-05-10T14:05:00', 'naive task time is read in the user zone');
+assert.deepEqual(rem({ tasks: [{ ...tk, start: '2026-05-10', allDay: true }] }), [], 'untimed task: digest only');
+assert.deepEqual(rem({ tasks: [{ ...tk, done: true }], tz: 'Europe/Madrid' }), []);
+
+// 08:00 in Tokyo is 23:00Z the day before; the window is [08:00, 14:00) local.
+const st = { enabled: true, digestAt: '08:00', leadMin: 10 };
+const dd = (iso, o = {}) => digestDue({ settings: st, tz: 'Asia/Tokyo', now: new Date(iso), lastDigestDate: null, ...o });
+assert.equal(dd('2026-05-09T22:59:00Z'), false, 'before');
+assert.equal(dd('2026-05-09T23:00:00Z'), true, 'at');
+assert.equal(dd('2026-05-10T04:59:00Z'), true, 'inside the window');
+assert.equal(dd('2026-05-10T05:00:00Z'), false, 'after the 6 h window');
+assert.equal(dd('2026-05-09T23:30:00Z', { lastDigestDate: '2026-05-10' }), false, 'already sent today');
+assert.equal(dd('2026-05-10T23:30:00Z', { lastDigestDate: '2026-05-10' }), true, 'next local day');
+assert.equal(dd('2026-05-09T23:30:00Z', { tz: 'America/Mexico_City' }), false, 'same instant, 17:30 in Mexico City');
+assert.equal(dd('2026-05-09T23:30:00Z', { settings: { ...st, enabled: false } }), false);
+assert.equal(dd('2026-05-09T23:30:00Z', { settings: { ...st, digestAt: null } }), false);
+
+const dg = digestItem({
+  tz: 'Asia/Tokyo', now: new Date('2026-05-09T23:30:00Z'),
+  events: [
+    ev('b', '2026-05-10T10:00:00+09:00', { title: 'Lunch' }), ev('a', '2026-05-10T09:00:00+09:00', { title: 'Standup' }),
+    ev('d', '2026-05-11', { allDay: true, title: 'Tomorrow' }), ev('c', '2026-05-10', { allDay: true, title: 'Holiday' }),
+  ],
+  inboxItems: [
+    { title: 'Late', due: '2026-05-09' }, { title: 'Today', due: '2026-05-10' }, { title: 'Someday', due: null },
+  ],
+});
+assert.equal(dg.key, 'digest:2026-05-10');
+assert.equal(dg.kind, 'digest');
+assert.ok(dg.body.indexOf('09:00  Standup') < dg.body.indexOf('10:00  Lunch'), 'agenda in time order');
+assert.ok(dg.body.includes('All day  Holiday') && !dg.body.includes('Tomorrow'));
+for (const s of ['Overdue\n- Late', 'Due today\n- Today', 'Inbox\n- Someday']) assert.ok(dg.body.includes(s), s);
+assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.');
+
+/* ---------- notify.js ---------- */
+
+{
+  const nd = await fs.mkdtemp(path.join(os.tmpdir(), 'dash-notify-'));
+  await initNotify(nd);
+  assert.deepEqual(getSettings('u1'), { enabled: false, digestAt: '08:00', leadMin: 10 });
+  await setSettings('u1', { enabled: true, digestAt: null, leadMin: 20 });
+
+  const t0 = new Date('2026-05-10T12:00:00Z');
+  assert.equal(await push('u1', { key: 'k1', kind: 'reminder', title: 'A', body: 'b' }, t0), true);
+  assert.equal(await push('u1', { key: 'k1', kind: 'reminder', title: 'A again', body: 'b' }, t0), false, 'same key is delivered once');
+  await push('u1', { key: 'k2', kind: 'digest', title: 'B', body: 'b' }, t0);
+  assert.deepEqual(feedOf('u1').map((n) => n.title), ['B', 'A'], 'newest first');
+  assert.equal(unreadOf('u1'), 2);
+  const [first] = feedOf('u1');
+  assert.equal(await markRead('u1', [first.id]), 1);
+  assert.equal(await markRead('u1', []), 0, 'no ids marks everything');
+  assert.equal(await markRead('nobody', []), 0);
+
+  // Feed is capped at 50; sent keys older than 3 days are forgotten on the next push.
+  for (let i = 0; i < 60; i++) await push('u1', { key: `f${i}`, kind: 'reminder', title: String(i), body: '' }, t0);
+  assert.equal(feedOf('u1').length, 50);
+  sentAdd('u1', 'old', new Date(t0.getTime() - 4 * 864e5));
+  sentAdd('u1', 'recent', new Date(t0.getTime() - 2 * 864e5));
+  pruneSent('u1', t0);
+  assert.equal(sentHas('u1', 'old'), false);
+  assert.equal(sentHas('u1', 'recent'), true);
+  await setDigestDate('u1', '2026-05-10');
+
+  await initNotify(nd); // restart
+  assert.equal(getSettings('u1').leadMin, 20);
+  assert.equal(digestDateOf('u1'), '2026-05-10');
+  assert.equal(feedOf('u1').length, 50);
+  assert.equal(await push('u1', { key: 'f59', kind: 'reminder', title: 'dup', body: '' }, t0), false, 'dedupe survives a restart');
+  await fs.rm(nd, { recursive: true, force: true });
+}
+
+// Concurrent writers share one tmp name: they must be serialised, none may reject.
+{
+  const nd = await fs.mkdtemp(path.join(os.tmpdir(), 'dash-notify-'));
+  await initNotify(nd);
+  const ops = [];
+  for (let i = 0; i < 40; i++) {
+    ops.push(push('c1', { key: `c${i}`, kind: 'reminder', title: String(i), body: '' }));
+    if (i % 3 === 0) ops.push(markRead('c1', []));
+  }
+  const res = await Promise.allSettled(ops);
+  assert.equal(res.filter((r) => r.status === 'rejected').length, 0, 'no rejected writes');
+  await markRead('c1', []);
+  await initNotify(nd);
+  assert.equal(feedOf('c1').length, 40);
+  assert.equal(unreadOf('c1'), 0);
+  await fs.rm(nd, { recursive: true, force: true });
+}
+
+// A corrupt notify.json must not stop startup; it is kept as .bak.
+{
+  const nd = await fs.mkdtemp(path.join(os.tmpdir(), 'dash-notify-'));
+  await fs.writeFile(path.join(nd, 'notify.json'), '{ not json');
+  await initNotify(nd);
+  assert.deepEqual(feedOf('x'), []);
+  assert.equal(await fs.readFile(path.join(nd, 'notify.json.bak'), 'utf8'), '{ not json');
+  assert.equal(await push('x', { key: 'k', kind: 'reminder', title: 't', body: '' }), true);
+  await fs.rm(nd, { recursive: true, force: true });
+}
+
 /* ---------- server: unauthenticated API access ---------- */
 
 {
@@ -347,10 +530,58 @@ assert.deepEqual(srcs('admin'), ['tasks', 'notes', 'drive', 'github']);
         if (m) { clearTimeout(t); resolve(Number(m[1])); }
       });
     });
-    for (const p of ['/api/search?q=ab', '/api/inbox', '/api/tasks']) {
+    for (const p of ['/api/search?q=ab', '/api/inbox', '/api/tasks', '/api/notifications', '/api/notes']) {
       const r = await fetch(`http://127.0.0.1:${port}${p}`);
       assert.equal(r.status, 401, `${p} requires a session`);
     }
+
+    // Signed in as the bootstrap admin: nested notes round-trip and nothing escapes the
+    // person's own notes dir.
+    const base = `http://127.0.0.1:${port}`;
+    const login = await fetch(`${base}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Owner', password: 'test-password-123' }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const uid = (await login.json()).user.id;
+    const call = (m, p, body) => fetch(base + p, {
+      method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body),
+    });
+
+    assert.equal((await call('PUT', '/api/notes/a/b.md', { body: 'hi #t1' })).status, 200);
+    assert.equal((await call('PUT', '/api/notes/c.md', { body: 'see [[a/b]] and [[b]]' })).status, 200);
+    const got = await (await call('GET', '/api/notes/a/b.md')).json();
+    assert.deepEqual([got.name, got.tags, got.backlinks], ['a/b.md', ['t1'], ['c.md']]);
+    const list = await (await call('GET', '/api/notes')).json();
+    assert.deepEqual(list.map((n) => n.name).sort(), ['a/b.md', 'c.md']);
+    assert.equal((await (await call('GET', '/api/notes?tag=t1')).json())[0].folder, 'a');
+
+    const mv = await (await call('POST', '/api/notes/rename', { from: 'a/b.md', to: 'z/b2.md' })).json();
+    assert.deepEqual(mv, { name: 'z/b2.md', rewritten: 1 });
+    assert.equal((await call('GET', '/api/notes/c.md')).status, 200);
+    assert.equal((await (await call('GET', '/api/notes/c.md')).json()).body, 'see [[z/b2]] and [[b2]]');
+    assert.equal((await call('POST', '/api/notes/rename', { from: 'c.md', to: 'z/b2.md' })).status, 409);
+    await assert.rejects(fs.stat(path.join(dir, 'notes', uid, 'a')), 'emptied folder is removed');
+
+    assert.equal((await call('PUT', '/api/notes/dd.md/n.md', { body: 'x' })).status, 200);
+    assert.equal((await call('PUT', '/api/notes/dd.md', { body: 'x' })).status, 409, 'name is a folder');
+    assert.equal((await call('POST', '/api/notes/rename', { from: 'c.md', to: 'dd.md' })).status, 409);
+    assert.equal((await call('DELETE', '/api/notes/dd.md/n.md')).status, 200);
+
+    for (const bad of ['..%2Fx.md', 'a%2F..%2Fb.md', '.h%2Fx.md']) {
+      assert.equal((await call('PUT', `/api/notes/${bad}`, { body: 'x' })).status, 400, bad);
+    }
+    assert.equal((await call('POST', '/api/notes/rename', { from: 'c.md', to: '../x.md' })).status, 400);
+    assert.deepEqual((await fs.readdir(path.join(dir, 'notes'))).sort(), [uid]);
+    assert.equal((await call('DELETE', '/api/notes/z/b2.md')).status, 200);
+    assert.equal((await (await call('GET', '/api/notes')).json()).length, 1);
+
+    const nf = await (await call('GET', '/api/notifications')).json();
+    assert.deepEqual([nf.unread, nf.items, nf.settings.enabled], [0, [], false]);
+    const put = await (await call('PUT', '/api/notifications/settings', { enabled: true, digestAt: 'bad', leadMin: 500 })).json();
+    assert.deepEqual(put, { enabled: true, digestAt: null, leadMin: 120 });
+    assert.deepEqual(await (await call('POST', '/api/notifications/read', {})).json(), { unread: 0 });
   } finally {
     child.removeAllListeners('exit');
     child.kill();

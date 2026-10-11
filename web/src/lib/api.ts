@@ -30,3 +30,6 @@ export const mmss = (ms: number) => {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
+
+// Note names are paths ("proj/ideas.md"): encode each segment, keep the slashes.
+export const encodePath = (name: string) => name.split('/').map(encodeURIComponent).join('/');

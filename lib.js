@@ -134,3 +134,236 @@ export function inboxScore({ due, priority, review }, today) {
 
 export const inboxOrder = (a, b) =>
   b.score - a.score || (a.due || '9999').localeCompare(b.due || '9999') || a.title.localeCompare(b.title);
+
+/* ---------- notes: folders, tags, links ---------- */
+
+const FOLDER_RE = /^[\w][\w .()'-]{0,60}$/;
+const MAX_FOLDERS = 3;
+
+// Trust boundary for nested notes: "folder/sub/name.md" becomes a path under the user's
+// notes dir. Every segment must start with a word character, which already rules out "",
+// "." and ".." as well as dotfiles.
+export function notePath(raw) {
+  const s = String(raw ?? '');
+  const parts = s.split('/');
+  const leaf = parts.pop();
+  if (s.includes('\\') || parts.length > MAX_FOLDERS || !NOTE_RE.test(leaf) || !parts.every((p) => FOLDER_RE.test(p))) {
+    throw Object.assign(new Error('bad note name'), { status: 400 });
+  }
+  return s;
+}
+
+const stripCode = (s) => s.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
+const FRONT_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+const TAG_RE = /(^|\s)#([A-Za-z][\w/-]{0,39})/gm;
+const LINK_RE = /\[\[([^[\]|#\n]+)((?:#[^[\]|\n]*)?)((?:\|[^[\]\n]*)?)\]\]/g;
+
+// Minimal frontmatter reader: only `tags:` is understood (inline list, comma list, or a
+// "- a" block). ponytail: not YAML; quoted commas and nested structures are not handled.
+function frontTags(front) {
+  const out = [];
+  const lines = front.split(/\r?\n/);
+  const i = lines.findIndex((l) => /^tags\s*:/i.test(l));
+  if (i < 0) return out;
+  const rest = lines[i].replace(/^tags\s*:/i, '').trim().replace(/^\[|\]$/g, '');
+  if (rest) out.push(...rest.split(','));
+  else {
+    for (const l of lines.slice(i + 1)) {
+      const m = /^\s*-\s*(.+)$/.exec(l);
+      if (!m) break;
+      out.push(m[1]);
+    }
+  }
+  return out.map((t) => t.trim().replace(/^["']|["']$/g, '').replace(/^#/, ''));
+}
+
+// Tags come from `#tag` in the prose (code and math removed first, so "# Title", "$x_#$" and
+// "`#!/bin`" do not count) plus the frontmatter; links are every [[target]].
+export function parseNote(body) {
+  const text = String(body ?? '');
+  const front = FRONT_RE.exec(text);
+  const prose = stripCode(front ? text.slice(front[0].length) : text)
+    .replace(/\$\$[\s\S]*?\$\$/g, ' ').replace(/\$[^$\n]*\$/g, ' ');
+  const tags = new Set(front ? frontTags(front[1]) : []);
+  for (const m of prose.matchAll(TAG_RE)) tags.add(m[2]);
+  const links = new Set();
+  for (const m of text.matchAll(LINK_RE)) links.add(m[1].trim().replace(/\.md$/i, ''));
+  return {
+    tags: [...new Set([...tags].map((t) => t.toLowerCase().slice(0, 40)).filter(Boolean))],
+    links: [...links],
+  };
+}
+
+const dirOf = (rel) => rel.slice(0, rel.lastIndexOf('/') + 1);
+const baseOf = (rel) => rel.slice(rel.lastIndexOf('/') + 1).replace(/\.md$/i, '');
+
+// Builds a (target, fromRel) -> rel|null lookup once, so backlinks over many notes do not
+// rescan the path list per link. Exact path (sans .md) wins; otherwise the first note whose
+// basename matches case-insensitively, alphabetical, preferring the linking note's folder.
+function resolver(paths) {
+  const exact = new Map(paths.map((p) => [p.slice(0, -3).toLowerCase(), p]));
+  const exactCase = new Set(paths.map((p) => p.slice(0, -3)));
+  const byBase = new Map();
+  for (const p of [...paths].sort()) {
+    const b = baseOf(p).toLowerCase();
+    if (!byBase.has(b)) byBase.set(b, []);
+    byBase.get(b).push(p);
+  }
+  return (target, from = '') => {
+    const t = String(target).trim().replace(/\.md$/i, '');
+    if (exactCase.has(t)) return `${t}.md`;
+    if (t.includes('/')) return exact.get(t.toLowerCase()) ?? null;
+    const c = byBase.get(t.toLowerCase());
+    if (!c) return null;
+    return c.find((p) => dirOf(p) === dirOf(from)) ?? c[0];
+  };
+}
+
+export const resolveLink = (target, paths, from = '') => resolver(paths)(target, from);
+
+// entries: [{rel, links}]. Computed on demand from the index, never persisted.
+export function backlinksOf(entries, rel) {
+  const resolve = resolver(entries.map((e) => e.rel));
+  return entries
+    .filter((e) => e.rel !== rel && e.links.some((l) => resolve(l, e.rel) === rel))
+    .map((e) => e.rel);
+}
+
+// Rewrites the links in `body` that point at oldRel so they point at newRel. Alias and
+// #section survive. A bare [[basename]] is left alone unless the basename itself changed
+// (a pure folder move keeps it valid); a [[full/path]] link always follows the move.
+// `allPaths` is the path list BEFORE the rename; `from` is the note that holds `body`.
+export function rewriteLinks(body, oldRel, newRel, allPaths, from = '') {
+  const resolve = resolver(allPaths);
+  let n = 0;
+  const out = String(body).replace(LINK_RE, (all, target, sec, alias) => {
+    if (resolve(target, from) !== oldRel) return all;
+    const t = target.trim();
+    const next = t.includes('/') ? newRel.slice(0, -3) : baseOf(newRel);
+    if (next === t.replace(/\.md$/i, '')) return all;
+    n++;
+    return `[[${next}${/\.md$/i.test(t) ? '.md' : ''}${sec}${alias}]]`;
+  });
+  return { body: out, n };
+}
+
+// entries: [{rel, mtimeMs, tags, body}] -> metadata rows, newest first (name hits, then
+// body/tag hits when searching). `q` starting with "#" is a tag filter. Capped at 200.
+export function filterNotes(entries, { q = '', tag = '', folder = '' } = {}, limit = 200) {
+  let query = String(q).trim();
+  let want = String(tag).trim().replace(/^#/, '').toLowerCase();
+  if (query.startsWith('#')) { want = query.slice(1).toLowerCase(); query = ''; }
+  const dir = String(folder).replace(/^\/+|\/+$/g, '');
+  const rows = [];
+  for (const e of entries) {
+    if (dir && !e.rel.startsWith(`${dir}/`)) continue;
+    if (want && !e.tags.some((t) => t === want || t.startsWith(`${want}/`))) continue;
+    let rank = 0;
+    let snip = null;
+    if (query) {
+      if (matches(e.rel, query)) snip = snippet(e.body, query);
+      else if (matches(e.body, query)) { rank = 1; snip = snippet(e.body, query); }
+      else if (e.tags.some((t) => matches(t, query))) rank = 2;
+      else continue;
+    }
+    rows.push({
+      rank,
+      name: e.rel,
+      folder: dirOf(e.rel).slice(0, -1),
+      modified: e.mtimeMs,
+      tags: e.tags,
+      ...(snip ? { snippet: snip } : {}),
+    });
+  }
+  rows.sort((a, b) => a.rank - b.rank || b.modified - a.modified);
+  return rows.slice(0, limit).map(({ rank, ...r }) => r);
+}
+
+/* ---------- reminders + daily digest ---------- */
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// Wall-clock date and minute-of-day for `now` in `tz` (process zone when unset).
+export function localNow(tz, now = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: tz || undefined, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(now).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, min: (+p.hour % 24) * 60 + +p.minute };
+}
+
+const HM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+export const hmToMin = (s) => { const m = HM_RE.exec(s); return m ? +m[1] * 60 + +m[2] : null; };
+
+// Whatever the client sent, only these three fields in these ranges are ever stored.
+export function cleanNotify(raw) {
+  const n = Math.round(Number(raw?.leadMin));
+  return {
+    enabled: raw?.enabled === true,
+    digestAt: typeof raw?.digestAt === 'string' && HM_RE.test(raw.digestAt) ? raw.digestAt : null,
+    leadMin: Number.isFinite(n) && raw?.leadMin !== null && raw?.leadMin !== '' ? Math.min(Math.max(n, 5), 120) : 10,
+  };
+}
+
+// Timed events and timed tasks starting within the next `leadMin` minutes that were not
+// announced yet. Keyed by id + start, so moving an item re-announces it. Tasks without a
+// time of day have no point-in-time reminder; they appear in the digest instead. `tz`
+// places the naive "YYYY-MM-DDTHH:mm" task starts.
+export function dueReminders({ events = [], tasks = [], now = new Date(), leadMin = 10, sent = {}, tz }) {
+  const t0 = new Date(now).getTime();
+  const out = [];
+  for (const [kind, list] of [['ev', events], ['tk', tasks]]) {
+    for (const x of list) {
+      if (x.allDay || x.done || !x.start || (kind === 'ev' && x.task)) continue;
+      let at;
+      try { at = Date.parse(taskWindow(x.start, 5, tz).start); } catch { continue; }
+      const d = at - t0;
+      const key = `${kind}:${x.id}:${x.start}`;
+      if (!(d > 0 && d <= leadMin * 60000) || sent[key]) continue;
+      out.push({
+        key, kind: 'reminder', title: x.title,
+        body: `Starts in ${Math.max(1, Math.round(d / 60000))} min`,
+        at: new Date(t0).toISOString(),
+      });
+    }
+  }
+  return out;
+}
+
+// True once per local day, inside [digestAt, digestAt + 6h). Outside that window the caller
+// just records the day as done: a server that was down at 08:00 should not send the morning
+// digest at 16:00.
+export function digestDue({ settings, now = new Date(), tz, lastDigestDate }) {
+  const at = hmToMin(settings?.digestAt);
+  if (!settings?.enabled || at === null) return false;
+  const l = localNow(tz, now);
+  return l.date !== lastDigestDate && l.min >= at && l.min < at + 360;
+}
+
+// Agenda for today, then what is overdue / due today, then the rest of the top inbox.
+export function digestItem({ events = [], inboxItems = [], tz, now = new Date() }) {
+  const today = ymd(tz, now);
+  const hm = (iso) => { const l = localNow(tz, new Date(iso)); return `${pad2(Math.floor(l.min / 60))}:${pad2(l.min % 60)}`; };
+  const agenda = events
+    .filter((e) => !e.task && !e.done && e.start && (e.allDay ? e.start.slice(0, 10) : localNow(tz, new Date(e.start)).date) === today)
+    .sort((a, b) => a.start.localeCompare(b.start))
+    .map((e) => `${e.allDay ? 'All day' : hm(e.start)}  ${e.title}`);
+  const dated = inboxItems.filter((i) => i.due);
+  const overdue = dated.filter((i) => i.due.slice(0, 10) < today);
+  const dueToday = dated.filter((i) => i.due.slice(0, 10) === today);
+  const listed = new Set([...overdue, ...dueToday]);
+  const rest = inboxItems.slice(0, 8).filter((i) => !listed.has(i));
+  const sec = (h, a) => (a.length ? [h, ...a.map((s) => `- ${s}`)] : []);
+  const lines = [
+    ...sec('Today', agenda),
+    ...sec('Overdue', overdue.map((i) => i.title)),
+    ...sec('Due today', dueToday.map((i) => i.title)),
+    ...sec('Inbox', rest.map((i) => i.title)),
+  ];
+  return {
+    key: `digest:${today}`,
+    kind: 'digest',
+    title: `Your day, ${today}`,
+    body: lines.join('\n') || 'Nothing scheduled today.',
+  };
+}

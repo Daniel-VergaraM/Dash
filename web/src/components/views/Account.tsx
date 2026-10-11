@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 import { jf, ago } from '../../lib/api';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
 import { useAuth } from '../../context/AuthContext';
-import type { Passkey } from '../../types';
+import type { Passkey, NotifySettings, NotificationsPayload } from '../../types';
 
 const TIMEZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -17,7 +17,8 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
   shortcuts: { view: string; label: string; key: string }[];
 }) {
   const webauthn = hasWebAuthn();
-  const { me, refresh } = useAuth();
+  const { me, refresh, can } = useAuth();
+  const canNotify = can('calendar:read') || can('tasks:read') || can('tasks:write');
   const [keys, setKeys] = useState<Passkey[]>([]);
   const [pkMsg, setPkMsg] = useState<{ text: string; ok?: boolean } | null>(null);
 
@@ -32,6 +33,33 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
       await refresh();
       setTzMsg({ text: 'Timezone saved.', ok: true });
     } catch (e) { setTzMsg({ text: (e as Error).message }); }
+  }
+
+  const [ns, setNs] = useState<NotifySettings | null>(null);
+  const [nsMsg, setNsMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+  const [perm, setPerm] = useState<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  );
+  useEffect(() => {
+    if (!active || !canNotify) return;
+    jf<NotificationsPayload>('/api/notifications')
+      .then((d) => setNs(d.settings))
+      .catch((e) => setNsMsg({ text: (e as Error).message }));
+  }, [active, canNotify]);
+
+  async function saveNotify(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ns) return;
+    setNsMsg(null);
+    try {
+      setNs(await jf<NotifySettings>('/api/notifications/settings', { method: 'PUT', body: JSON.stringify(ns) }));
+      setNsMsg({ text: 'Notification settings saved.', ok: true });
+    } catch (err) { setNsMsg({ text: (err as Error).message }); }
+  }
+
+  // Must run from a click: browsers ignore permission prompts that are not a user gesture.
+  async function enableBrowserAlerts() {
+    try { setPerm(await Notification.requestPermission()); } catch { setPerm('denied'); }
   }
 
   const [pwCurrent, setPwCurrent] = useState('');
@@ -145,6 +173,54 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
           </button>
           {tzMsg && <div className="small" role={tzMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: tzMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{tzMsg.text}</div>}
         </div>
+
+        {canNotify && (
+          <div className="card">
+            <h3>Notifications</h3>
+            <p className="muted small" style={{ marginTop: -6 }}>
+              Reminders before timed events and tasks, plus an optional daily digest. They appear in the
+              bell and, with browser alerts on, as system notifications — only while this tab is open.
+            </p>
+            {!me?.connected.google && (
+              <p className="small err" role="status">Connect Google to get reminders: they come from your calendar and tasks.</p>
+            )}
+            {ns ? (
+              <form onSubmit={saveNotify}>
+                <label className="rowlabel">
+                  <input type="checkbox" checked={ns.enabled} onChange={(e) => setNs({ ...ns, enabled: e.target.checked })} />
+                  Enable notifications
+                </label>
+                <label className="small muted" style={{ display: 'block', marginTop: 10 }}>
+                  Daily digest at (empty = off)
+                  <input
+                    type="time" value={ns.digestAt ?? ''} style={{ display: 'block', width: '100%', marginTop: 4 }}
+                    onChange={(e) => setNs({ ...ns, digestAt: e.target.value || null })}
+                  />
+                </label>
+                <label className="small muted" style={{ display: 'block', marginTop: 10 }}>
+                  Remind me before
+                  <select
+                    value={ns.leadMin} style={{ display: 'block', width: '100%', marginTop: 4 }}
+                    onChange={(e) => setNs({ ...ns, leadMin: Number(e.target.value) })}
+                  >
+                    {[5, 10, 15, 30, 60].map((m) => <option key={m} value={m}>{m} minutes</option>)}
+                    {![5, 10, 15, 30, 60].includes(ns.leadMin) && <option value={ns.leadMin}>{ns.leadMin} minutes</option>}
+                  </select>
+                </label>
+                <div className="row" style={{ marginTop: 12 }}>
+                  <button className="primary" type="submit">Save notifications</button>
+                  {perm === 'default' && <button type="button" onClick={enableBrowserAlerts}>Enable browser alerts</button>}
+                </div>
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  {perm === 'granted' && 'Browser alerts are on.'}
+                  {perm === 'denied' && 'Browser alerts are blocked; allow notifications for this site in your browser settings.'}
+                  {perm === 'unsupported' && 'This browser does not support system notifications.'}
+                </p>
+              </form>
+            ) : !nsMsg && <p className="muted">Loading…</p>}
+            {nsMsg && <div className="small" role={nsMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: nsMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{nsMsg.text}</div>}
+          </div>
+        )}
 
         <div className="card">
           <h3>Accessibility</h3>
