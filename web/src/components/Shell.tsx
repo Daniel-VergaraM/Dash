@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Home, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X,
+  Home, Inbox as InboxIcon, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import type { Capability, ViewName } from '../types';
 import { jf } from '../lib/api';
 import { getKbdMode, setKbdMode as persistKbdMode, getVimNav, setVimNav as persistVimNav } from '../lib/kbdMode';
 import { isTypingTarget } from '../lib/kbd';
+import CommandPalette from './CommandPalette';
 import Today from './views/Today';
+import Inbox from './views/Inbox';
 import Tasks from './views/Tasks';
 import CalendarView from './views/CalendarView';
 import Notes from './views/Notes';
@@ -17,8 +19,9 @@ import GitHubView from './views/GitHubView';
 import Account from './views/Account';
 import Access from './views/Access';
 
-const NAV: { view: ViewName; label: string; cap?: Capability; icon: typeof Home; key: string }[] = [
+export const NAV: { view: ViewName; label: string; cap?: Capability; icon: typeof Home; key: string }[] = [
   { view: 'today', label: 'Today', icon: Home, key: 't' },
+  { view: 'inbox', label: 'Inbox', cap: 'tasks:read', icon: InboxIcon, key: 'i' },
   { view: 'tasks', label: 'Tasks', cap: 'tasks:read', icon: ListChecks, key: 'k' },
   { view: 'calendar', label: 'Calendar', cap: 'calendar:read', icon: CalendarDays, key: 'c' },
   { view: 'notes', label: 'Notes', cap: 'notes:read', icon: FileText, key: 'n' },
@@ -36,6 +39,9 @@ export default function Shell() {
   const [connBusy, setConnBusy] = useState<string | null>(null);
   const [kbdMode, setKbdModeState] = useState(() => getKbdMode());
   const [vimNav, setVimNavState] = useState(() => getVimNav());
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [taskReq, setTaskReq] = useState<{ id: string } | null>(null);
+  const [noteReq, setNoteReq] = useState<{ name: string } | null>(null);
   const navRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [navFocusIdx, setNavFocusIdx] = useState(0);
 
@@ -79,6 +85,19 @@ export default function Shell() {
       window.clearTimeout(chordTimer);
     };
   }, [items]);
+
+  // Ctrl/Cmd+K is the one shortcut that fires while typing: it does not collide with the
+  // g-chord or useListNav, which both ignore any keypress with a modifier held.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   function onNavKeyDown(e: React.KeyboardEvent, i: number) {
     const forward = e.key === 'ArrowDown' || e.key === 'ArrowRight';
@@ -152,9 +171,12 @@ export default function Shell() {
 
       <main id="main" tabIndex={-1}>
         <Section active={view === 'today'}><Today active={view === 'today'} vimNav={vimNav} /></Section>
-        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} vimNav={vimNav} /></Section>
+        <Section active={view === 'inbox'}>
+          <Inbox active={view === 'inbox'} vimNav={vimNav} onOpenTasks={() => setView('tasks')} />
+        </Section>
+        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} vimNav={vimNav} focusReq={taskReq} /></Section>
         <Section active={view === 'calendar'}><CalendarView active={view === 'calendar'} /></Section>
-        <Section active={view === 'notes'}><Notes active={view === 'notes'} vimNav={vimNav} /></Section>
+        <Section active={view === 'notes'}><Notes active={view === 'notes'} vimNav={vimNav} openName={noteReq} /></Section>
         <Section active={view === 'drive'}><Drive active={view === 'drive'} vimNav={vimNav} /></Section>
         <Section active={view === 'music'}><MusicView active={view === 'music'} vimNav={vimNav} /></Section>
         <Section active={view === 'github'}><GitHubView active={view === 'github'} /></Section>
@@ -166,6 +188,21 @@ export default function Shell() {
         </Section>
         <Section active={view === 'access'}><Access active={view === 'access'} vimNav={vimNav} /></Section>
       </main>
+
+      {paletteOpen && (
+        <CommandPalette
+          views={items}
+          canAddTask={can('tasks:write')}
+          onClose={() => setPaletteOpen(false)}
+          onGo={setView}
+          onNewTask={() => {
+            setView('tasks');
+            setTimeout(() => document.querySelector<HTMLInputElement>('input[aria-label="Task"]')?.focus(), 0);
+          }}
+          onOpenTask={(id) => { setTaskReq({ id }); setView('tasks'); }}
+          onOpenNote={(name) => { setNoteReq({ name }); setView('notes'); }}
+        />
+      )}
     </div>
   );
 }

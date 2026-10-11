@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { noteName, macFromArp, taskWindow, startOfDay } from './lib.js';
+import {
+  noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
+  prioToLinear, prioFromLinear, inboxScore, inboxOrder, issuePatch, linearLink,
+} from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, capsOf, allows, validPassword, normalizeMac, cleanName,
   cleanPermissions, cleanTimezone, hashPassword, verifyPassword, initAuth, createUser, updateUser,
@@ -277,5 +280,82 @@ await initTaskMeta(tmDir); // persistence round-trip does not crash on an empty 
 assert.deepEqual(subtasksOf('evt1'), []);
 
 await fs.rm(tmDir, { recursive: true, force: true });
+
+/* ---------- palette search + inbox ---------- */
+
+const T = '2026-05-10';
+const sc = (i) => inboxScore(i, T);
+assert.ok(sc({ due: '2026-05-09' }) > sc({ due: T }), 'overdue outranks today');
+assert.ok(sc({ due: T }) > sc({ due: '2026-05-12' }), 'today outranks within 3 days');
+assert.ok(sc({ due: '2026-05-12' }) > sc({ due: null }), 'dated outranks undated');
+assert.equal(sc({ due: '2026-06-30' }), 0, 'far future adds nothing');
+assert.ok(sc({ priority: 'high' }) > sc({ priority: 'low' }), 'high outranks low');
+assert.ok(sc({ review: true }) > sc({}), 'review-requested raises the score');
+const ordered = [{ score: 5, due: null, title: 'b' }, { score: 5, due: null, title: 'a' }, { score: 9, due: null, title: 'z' }].sort(inboxOrder);
+assert.deepEqual(ordered.map((x) => x.title), ['z', 'a', 'b']);
+
+assert.deepEqual([1, 2, 3, 4, 0].map(prioFromLinear), ['high', 'high', 'med', 'low', null]);
+for (const p of ['high', 'med', 'low']) assert.equal(prioFromLinear(prioToLinear(p)), p, 'round trip ' + p);
+assert.equal(prioToLinear(null), 0);
+
+const lm = { linearId: 'abc' };
+assert.equal(issuePatch({ title: 'x' }, { title: 'x' }, {}), null, 'no linked issue, nothing to sync');
+assert.equal(issuePatch({ done: true }, { status: 'completed' }, lm), null, 'done alone is not a field sync');
+assert.deepEqual(issuePatch({ title: 'T' }, { title: 'T' }, lm), { title: 'T', dueDate: undefined, priority: undefined });
+assert.deepEqual(
+  issuePatch({ start: 's', priority: 'high' }, { due: '2026-05-10T00:00:00.000Z' }, lm),
+  { title: undefined, dueDate: '2026-05-10', priority: 2 });
+assert.equal(issuePatch({ priority: null }, {}, lm).priority, 0, 'clearing priority clears it in Linear');
+
+const good = { id: 'a1b2-c3', url: 'https://linear.app/acme/issue/ENG-12/x', key: 'ENG-12' };
+assert.deepEqual(linearLink(good), { linearId: 'a1b2-c3', linearUrl: good.url, linearKey: 'ENG-12' });
+for (const bad of [null, 'x', {}, { ...good, url: 'http://linear.app/x' }, { ...good, url: 'https://evil.com/linear.app/x' },
+  { ...good, id: 'a b' }, { ...good, key: 'nope' }, { ...good, id: 5 }]) assert.equal(linearLink(bad), null);
+
+assert.ok(matches('Hello World', 'WORLD'));
+assert.equal(snippet('nothing here', 'zzz'), null);
+const long = 'a'.repeat(100) + ' NEEDLE ' + 'b'.repeat(100);
+const snip = snippet(long, 'needle');
+assert.ok(snip.includes('NEEDLE') && snip.length <= 40 + 6 + 40, 'snippet is cut to +-40 chars');
+
+assert.equal(driveTerm(`a'b" or name contains 'c`), 'ab or name contains c', 'quotes never reach the query');
+assert.equal(driveTerm(`x\'y`), 'xy');
+
+const srcs = (role) => searchSources({ role });
+assert.deepEqual(srcs('guest'), ['tasks', 'notes']);
+assert.deepEqual(srcs('member'), ['tasks', 'notes', 'drive']);
+assert.deepEqual(srcs('admin'), ['tasks', 'notes', 'drive', 'github']);
+
+/* ---------- server: unauthenticated API access ---------- */
+
+{
+  const { spawn } = await import('node:child_process');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dash-test-'));
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: import.meta.dirname,
+    env: { ...process.env, DATA_DIR: dir, PORT: '0', HOST: '127.0.0.1', MAC_LOGIN: 'false', ACCESS_PASSWORD: 'test-password-123' },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let out = '';
+      const t = setTimeout(() => reject(new Error('server did not start')), 30000);
+      child.on('exit', (c) => reject(new Error(`server exited early (${c})`)));
+      child.stdout.on('data', (d) => {
+        out += d;
+        const m = /listening on \S+:(\d+)/.exec(out);
+        if (m) { clearTimeout(t); resolve(Number(m[1])); }
+      });
+    });
+    for (const p of ['/api/search?q=ab', '/api/inbox', '/api/tasks']) {
+      const r = await fetch(`http://127.0.0.1:${port}${p}`);
+      assert.equal(r.status, 401, `${p} requires a session`);
+    }
+  } finally {
+    child.removeAllListeners('exit');
+    child.kill();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
 
 console.log('ok');

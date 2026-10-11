@@ -6,7 +6,10 @@ import { execFile } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
-import { noteName, macFromArp, taskWindow, startOfDay } from './lib.js';
+import {
+  noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
+  prioFromLinear, linearLink, issuePatch, ymd, inboxScore, inboxOrder,
+} from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
   updateUser, deleteUser, signIn, userByMac, startSession, sessionUser, endSession, sessionsOf,
@@ -21,11 +24,11 @@ import {
 
 const execFileP = promisify(execFile);
 const DIR = import.meta.dirname;
-const DATA = path.join(DIR, 'data');
+const DATA = path.resolve(DIR, process.env.DATA_DIR || 'data');
 const NOTES = path.join(DATA, 'notes');
 const notesDir = (userId) => path.join(NOTES, userId);
 const TOKEN_FILE = path.join(DATA, 'tokens.json');
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT ?? 3000); // PORT=0 -> ephemeral
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 await fs.mkdir(NOTES, { recursive: true });
@@ -60,6 +63,22 @@ const wrap = (fn) => (req, res) =>
     (d) => (res.headersSent ? undefined : res.json(d ?? {})),
     (e) => res.status(e.status || 500).json({ error: e.message }),
   );
+
+// Short-lived per-key cache for upstream reads the palette and inbox repeat.
+// ponytail: never evicted — keys are per user, so it is bounded by headcount.
+const memos = new Map();
+const gens = new Map(); // bumped on every drop, so a read that started earlier cannot repopulate
+const drop = (key) => { memos.delete(key); gens.set(key, (gens.get(key) || 0) + 1); };
+async function memo(key, ttlMs, fn) {
+  const hit = memos.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.data;
+  const gen = gens.get(key) || 0;
+  const data = await fn();
+  if ((gens.get(key) || 0) === gen) memos.set(key, { at: Date.now(), data });
+  return data;
+}
+// A task write makes the cached task list (and the inbox built from it) stale.
+const bust = (uid) => { drop(`tasks:${uid}`); drop(`inbox:${uid}`); };
 
 /* ---------- OAuth (one helper, two providers) ---------- */
 
@@ -648,6 +667,7 @@ function shapeTask(t, meta = {}) {
 // The API wants an RFC 3339 timestamp but only reads the date out of it.
 function dueFrom(startInput, tz) {
   if (!startInput) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(startInput)) return startInput + 'T00:00:00.000Z'; // date only (inbox)
   const { start } = taskWindow(startInput, 30, tz);
   return start.slice(0, 10) + 'T00:00:00.000Z';
 }
@@ -686,6 +706,22 @@ async function linearIssueFor(userId, projectId, { title, notes, due }) {
   return res.issueCreate.issue;
 }
 
+// One mutation with only the fields that changed. `dueDate: null` and `priority: 0` clear them.
+async function linearUpdateIssue(userId, issueId, fields) {
+  const input = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+  if (!Object.keys(input).length) return;
+  const res = await linear(userId, `mutation($id: String!, $input: IssueUpdateInput!) {
+    issueUpdate(id: $id, input: $input) { success }
+  }`, { id: issueId, input });
+  if (!res.issueUpdate?.success) throw fail(502, 'Linear rejected the update');
+}
+
+// Archive is reversible from Linear; issueDelete is never used here.
+async function linearArchiveIssue(userId, issueId) {
+  const res = await linear(userId, `mutation($id: String!) { issueArchive(id: $id) { success } }`, { id: issueId });
+  if (!res.issueArchive?.success) throw fail(502, 'Linear rejected the archive');
+}
+
 async function linearSetIssueDone(userId, issueId, done) {
   // Linear has no boolean "done": an issue moves to a workflow state, and which state counts
   // as finished is defined per team, so the team's states have to be read first.
@@ -706,9 +742,9 @@ async function linearSetIssueDone(userId, issueId, done) {
 
 /* --- routes --- */
 
-app.get('/api/tasks', can('tasks:read', 'tasks:write'), wrap(async (req) => {
+async function listTasks(uid) {
   const q = new URLSearchParams({ maxResults: '100', showCompleted: 'true', showHidden: 'true' });
-  const r = await api(req.user.id, 'google', tasksUrl(`?${q}`));
+  const r = await api(uid, 'google', tasksUrl(`?${q}`));
   const cutoff = Date.now() - DONE_GRACE_MS;
 
   return (r.items || [])
@@ -717,7 +753,9 @@ app.get('/api/tasks', can('tasks:read', 'tasks:write'), wrap(async (req) => {
     .filter((t) => t.status !== 'completed' || (t.completed && Date.parse(t.completed) > cutoff))
     .map((t) => shapeTask(t, metaOf(t.id)))
     .sort((a, b) => Number(a.done) - Number(b.done) || (a.start || '9999').localeCompare(b.start || '9999'));
-}));
+}
+
+app.get('/api/tasks', can('tasks:read', 'tasks:write'), wrap((req) => listTasks(req.user.id)));
 
 app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   const title = String(req.body?.title || '').trim();
@@ -740,7 +778,10 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   // The Google task already exists, so a Linear failure must not lose it: the issue is
   // best-effort and its error rides back with the created task.
   let warning = null;
-  if (req.body?.project) {
+  // Linking an existing issue (from the inbox) never files a new one.
+  const link = allows(req.user, 'projects:read') ? linearLink(req.body?.linearIssue) : null;
+  if (link) Object.assign(meta, link);
+  else if (req.body?.project) {
     try {
       const issue = await linearIssueFor(req.user.id, String(req.body.project), { title, notes, due });
       Object.assign(meta, { linearId: issue.id, linearUrl: issue.url, linearKey: issue.identifier });
@@ -750,6 +791,7 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   }
 
   const saved = await setMeta(created.id, meta);
+  bust(req.user.id);
   return { ...shapeTask(created, saved), warning };
 }));
 
@@ -777,21 +819,37 @@ app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
   if (req.body?.project !== undefined) patch.project = req.body.project || null;
   const meta = Object.keys(patch).length ? await setMeta(req.params.id, patch) : metaOf(req.params.id);
 
-  let warning = null;
+  const warnings = [];
   if (req.body?.done !== undefined && meta.linearId) {
     try { await linearSetIssueDone(req.user.id, meta.linearId, !!req.body.done); }
-    catch (e) { warning = `Task updated, but its Linear issue did not: ${e.message}`; }
+    catch (e) { warnings.push(`Task updated, but its Linear issue did not: ${e.message}`); }
+  }
+  // Task -> issue only; edits made in Linear are not pulled back.
+  const fields = issuePatch(req.body, body, meta);
+  if (fields) {
+    try {
+      await linearUpdateIssue(req.user.id, meta.linearId, fields);
+    } catch (e) { warnings.push(`Task updated, but its Linear issue did not sync: ${e.message}`); }
   }
 
-  return { ...shapeTask(updated, meta), warning };
+  bust(req.user.id);
+  return { ...shapeTask(updated, meta), warning: warnings.join(' ') || null };
 }));
 
 app.delete('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {
+  const { linearId } = metaOf(req.params.id); // read before deleteMeta drops it
   await api(req.user.id, 'google', tasksUrl(`/${encodeURIComponent(req.params.id)}`), { method: 'DELETE' });
-  // The Linear issue is left alone on purpose: deleting tracked work from a shared tracker
-  // because someone tidied their own list is not a call this app should make.
   await deleteMeta(req.params.id);
-  return { ok: true };
+  bust(req.user.id);
+  // The Linear issue is left alone unless the caller opts in with ?linear=archive, and even
+  // then it is archived (reversible), never deleted: tidying your own list is not a call
+  // this app should make on a shared tracker by default.
+  let warning = null;
+  if (linearId && req.query.linear === 'archive') {
+    try { await linearArchiveIssue(req.user.id, linearId); }
+    catch (e) { warning = `Task deleted, but its Linear issue was not archived: ${e.message}`; }
+  }
+  return { ok: true, warning };
 }));
 
 // How many pre-migration tasks are still sitting in the calendar. Drives the one-time
@@ -820,6 +878,7 @@ app.post('/api/tasks/migrate', can('tasks:write'), wrap(async (req) => {
     await deleteMeta(e.id);
     moved += 1;
   }
+  bust(req.user.id);
   await audit('tasks-migrated', { by: req.user.name, moved });
   return { moved };
 }));
@@ -928,7 +987,7 @@ const FILE_FIELDS = 'files(id,name,mimeType,modifiedTime,webViewLink,iconLink,si
 
 // Two modes: browsing one folder (the default, starting at My Drive) or searching everywhere.
 app.get('/api/drive', can('drive:read'), wrap(async (req) => {
-  const term = String(req.query.q || '').trim().split(/[^ 0-9a-zA-Z._-]/).join('');
+  const term = driveTerm(req.query.q);
   const folder = String(req.query.folder || 'root').split(/[^0-9a-zA-Z_-]/).join('');
 
   const q = new URLSearchParams(term
@@ -1117,8 +1176,7 @@ app.post('/api/spotify/:cmd', can('music:control'), wrap(async (req) => {
 
 const EVENT_TYPES = ['PushEvent', 'PullRequestEvent', 'IssuesEvent', 'CreateEvent', 'ReleaseEvent'];
 
-app.get('/api/github', can('github:read'), wrap(async (req) => {
-  const uid = req.user.id;
+async function githubSummary(uid) {
   const user = await api(uid, 'github', '/user');
   const [repos, events, prs] = await Promise.all([
     api(uid, 'github', '/user/repos?sort=pushed&per_page=10&affiliation=owner,collaborator'),
@@ -1146,6 +1204,137 @@ app.get('/api/github', can('github:read'), wrap(async (req) => {
       repo: p.repository_url.split('/').slice(-2).join('/'),
     })),
   };
+}
+
+app.get('/api/github', can('github:read'), wrap((req) => githubSummary(req.user.id)));
+const githubCached = (uid) => memo(`github:${uid}`, 120_000, () => githubSummary(uid));
+
+/* ---------- Search (command palette) ---------- */
+
+const top = (a) => a.slice(0, 8);
+
+app.get('/api/search', wrap(async (req) => {
+  const q = String(req.query.q || '').trim();
+  const out = { tasks: [], notes: [], files: [], repos: [], prs: [] };
+  if (q.length < 2) return out;
+  const uid = req.user.id;
+
+  const sources = {
+    tasks: async () => {
+      const all = await memo(`tasks:${uid}`, 60_000, () => listTasks(uid));
+      out.tasks = top(all.filter((t) => matches(t.title, q)).map((t) => ({ id: t.id, title: t.title, start: t.start, done: t.done })));
+    },
+    // ponytail: reads every note on each search — O(n) files; add an index if someone has >1000.
+    notes: async () => {
+      const dir = notesDir(uid);
+      const names = (await fs.readdir(dir)).filter((n) => n.endsWith('.md'));
+      const hits = await Promise.all(names.map(async (name) => {
+        const body = await fs.readFile(path.join(dir, name), 'utf8').catch(() => '');
+        if (!matches(name, q) && !matches(body, q)) return null;
+        // Only a snippet ever leaves the server, never the whole note.
+        return { name, snippet: snippet(body, q) ?? body.slice(0, 80).replace(/\s+/g, ' ').trim() };
+      }));
+      out.notes = top(hits.filter(Boolean));
+    },
+    drive: async () => {
+      const term = driveTerm(q);
+      if (!term) return;
+      const p = new URLSearchParams({
+        q: `name contains '${term}' and trashed = false`,
+        pageSize: '8',
+        fields: 'files(id,name,mimeType,webViewLink)',
+      });
+      const r = await api(uid, 'google', `/drive/v3/files?${p}`);
+      out.files = top((r.files || []).map((f) => ({ id: f.id, name: f.name, webViewLink: f.webViewLink, folder: f.mimeType === FOLDER })));
+    },
+    github: async () => {
+      const gh = await githubCached(uid);
+      out.repos = top(gh.repos.filter((r) => matches(r.name, q) || matches(r.desc, q)).map((r) => ({ name: r.name, url: r.url })));
+      out.prs = top(gh.prs.filter((p) => matches(p.title, q) || matches(p.repo, q)).map((p) => ({ title: p.title, url: p.url, repo: p.repo })));
+    },
+  };
+
+  // A source that is unconnected, refused or down just contributes nothing.
+  await Promise.allSettled(searchSources(req.user).map((s) => sources[s]()));
+  return out;
+}));
+
+/* ---------- Inbox (what needs attention, across tasks / Linear / GitHub) ---------- */
+
+async function buildInbox(user) {
+  const uid = user.id;
+  const today = ymd(user.timezone);
+  const items = [];
+  const warnings = [];
+  const linked = new Set(); // Linear issues already represented by a task
+  const add = (it, review = false) => items.push({ ...it, score: inboxScore({ ...it, review }, today) });
+
+  // Sources run in parallel; Tasks fills `linked` itself, and the Linear/GitHub results are
+  // only folded in afterwards, so dedupe sees every task regardless of timing.
+  const jobs = [
+    ['Google Tasks', async () => {
+      for (const t of await listTasks(uid)) {
+        const lid = metaOf(t.id).linearId;
+        if (lid) linked.add(lid);
+        if (t.done) continue;
+        add({
+          kind: 'task', id: t.id, title: t.title, url: t.linearUrl || null, due: t.start ? t.start.slice(0, 10) : null,
+          priority: t.priority, source: 'google', meta: t.linearKey || 'Task',
+        });
+      }
+    }],
+  ];
+  if (allows(user, 'projects:read')) {
+    jobs.push(['Linear', async () => {
+      const d = await linear(uid, `query { viewer { assignedIssues(first: 50, filter: { state: { type: { nin: ["completed", "canceled"] } } }) {
+        nodes { id identifier title url priority dueDate project { name } state { name } } } } }`);
+      return d.viewer.assignedIssues.nodes;
+    }]);
+  }
+  if (allows(user, 'github:read')) {
+    jobs.push(['GitHub', async () => {
+      const gh = await githubCached(uid);
+      const rr = await api(uid, 'github', `/search/issues?q=${encodeURIComponent(`is:open is:pr review-requested:${gh.user.login}`)}&per_page=20`);
+      return { gh, rr: rr.items || [] };
+    }]);
+  }
+
+  const settled = await Promise.allSettled(jobs.map(([, fn]) => fn()));
+  settled.forEach((r, i) => {
+    const name = jobs[i][0];
+    if (r.status === 'rejected') { warnings.push(`${name}: ${r.reason?.message || 'failed'}`); return; }
+    if (name === 'Linear') {
+      for (const n of r.value) {
+        if (linked.has(n.id)) continue;
+        add({
+          kind: 'issue', id: n.id, key: n.identifier, title: n.title, url: n.url, due: n.dueDate || null,
+          priority: prioFromLinear(n.priority), source: 'linear',
+          meta: [n.identifier, n.project?.name, n.state?.name].filter(Boolean).join(' · '),
+        });
+      }
+    } else if (name === 'GitHub') {
+      const seen = new Set();
+      for (const p of r.value.rr) {
+        seen.add(p.html_url);
+        add({
+          kind: 'pr', id: p.html_url, title: p.title, url: p.html_url, due: null, priority: null,
+          source: 'github', meta: `${p.repository_url.split('/').slice(-2).join('/')} · review requested`,
+        }, true);
+      }
+      for (const p of r.value.gh.prs) {
+        if (seen.has(p.url)) continue;
+        add({ kind: 'pr', id: p.url, title: p.title, url: p.url, due: null, priority: null, source: 'github', meta: `${p.repo} · yours` });
+      }
+    }
+  });
+
+  return { items: items.sort(inboxOrder), warnings };
+}
+
+app.get('/api/inbox', can('tasks:read', 'tasks:write'), wrap(async (req) => {
+  const key = `inbox:${req.user.id}`;
+  if (req.query.refresh) drop(key);
+  return memo(key, 60_000, () => buildInbox(req.user));
 }));
 
 app.use(express.static(path.join(DIR, 'public')));
@@ -1153,4 +1342,4 @@ app.use(express.static(path.join(DIR, 'public')));
 // Behind a proxy, bind to loopback (HOST=127.0.0.1) so the port cannot be reached directly —
 // otherwise :3000 is a way in that skips nginx and its rate limit entirely.
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => console.log(`dash listening on ${HOST}:${PORT} (${BASE_URL})`));
+const srv = app.listen(PORT, HOST, () => console.log(`dash listening on ${HOST}:${srv.address().port} (${BASE_URL})`));

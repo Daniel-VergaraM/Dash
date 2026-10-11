@@ -151,4 +151,25 @@ export interface AccessData {
 }
 
 export type ViewName =
-  | 'today' | 'tasks' | 'calendar' | 'notes' | 'drive' | 'music' | 'github' | 'account' | 'access';
+  | 'today' | 'inbox' | 'tasks' | 'calendar' | 'notes' | 'drive' | 'music' | 'github' | 'account' | 'access';
+
+export interface InboxItem {
+  kind: 'task' | 'issue' | 'pr';
+  id: string;
+  key?: string; // Linear identifier, issues only
+  title: string;
+  url: string | null;
+  due: string | null;
+  priority: Priority | null;
+  source: 'google' | 'linear' | 'github';
+  meta: string;
+  score: number;
+}
+
+export interface SearchResults {
+  tasks: { id: string; title: string; start: string | null; done: boolean }[];
+  notes: { name: string; snippet: string }[];
+  files: { id: string; name: string; webViewLink?: string; folder: boolean }[];
+  repos: { name: string; url: string }[];
+  prs: { title: string; url: string; repo: string }[];
+}

@@ -167,10 +167,20 @@ nav .who b { display: block; color: var(--fg); font-size: 13px; }
 .tag.off { color: var(--bad); border-color: var(--bad); background: rgba(255,123,114,.1); }
 button.danger { color: var(--bad); border-color: var(--line); }
 button.danger:hover { border-color: var(--bad); background: rgba(255,123,114,.08); }
-#modal { position: fixed; inset: 0; background: rgba(6,7,10,.65); backdrop-filter: blur(2px);
+#modal, .modal { position: fixed; inset: 0; background: rgba(6,7,10,.65); backdrop-filter: blur(2px);
   z-index: 30; display: grid; place-items: center; animation: fadein .12s ease-out; }
 #userForm, #projectsForm { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px;
   width: min(480px, 92vw); max-height: 90vh; overflow: auto; box-shadow: var(--shadow); animation: rise .18s ease-out; }
+#palette { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
+  width: min(560px, 92vw); max-height: 70vh; display: flex; flex-direction: column; box-shadow: var(--shadow);
+  align-self: start; margin-top: 12vh; }
+#palette input { width: 100%; padding: 10px 12px; }
+#palette ul.list { overflow: auto; margin-top: 8px; }
+#palette ul.list li { align-items: center; padding: 7px 8px; border-bottom: none; border-radius: var(--radius-sm); cursor: pointer; }
+#palette ul.list li.on { background: var(--panel2); outline: 1px solid var(--accent-dim); }
+#palette .pal-group { width: 96px; flex: none; }
+#palette .pal-hint { max-width: 45%; }
+.inbox-src { flex: none; }
 #projectsForm { width: min(640px, 92vw); border-radius: var(--radius); box-shadow: none; }
 #userForm h3, #projectsForm h3 { margin: 0 0 14px; }
 #projectsForm .row > .grow { min-width: 160px; }

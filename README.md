@@ -11,16 +11,16 @@ npm start              # http://localhost:3000
 
 ## How it stores things
 
-- **Tasks are calendar events.** A task is a Google Calendar event tagged
-  `extendedProperties.private.dash=task`. That is the whole "sync" — no local task table, no
-  reconciliation, no drift. Ticking a task sets `done=1` on the same event.
+- **Tasks are Google Tasks.** Google is the system of record; there is no local task table.
+  Only what its API cannot hold (time of day, duration, priority, project, Linear issue ids,
+  subtasks) sits in `data/task-meta.json`, keyed by Google task id.
 - **Notes are `.md` files** in `data/notes/<userId>/` — one private folder per person. Edit
   them here or in any editor.
 - **Tokens** live in `data/tokens.json`, keyed by user id: each person's Google/Spotify/Linear/
   GitHub connection is their own. Delete the file to disconnect everyone; delete one person's
   entry to disconnect just them.
 
-Nothing else is persisted, so `data/` is the entire backup surface.
+Nothing else is persisted, so `data/` is the entire backup surface (`DATA_DIR`, default `data`; docker-compose.yml sets `/app/data`, the `dash_data` volume mount).
 
 ## Authentication and authorization
 
@@ -130,12 +130,20 @@ issues them (GitHub OAuth Apps don't expire by default, so there's nothing to re
 There is no shared connection — if you haven't connected a service yourself, you see a "Connect"
 prompt, never someone else's data.
 
-Google scopes: `calendar` (read/write, for tasks) and `drive.readonly`.
+Google scopes: `calendar` (read/write), `tasks` and `drive.readonly`.
 
 Linear scopes: `read,write`, covering project create/edit/archive. A Linear project always
 belongs to at least one team, so creating a project from Dash requires picking one. Projects
 are Linear's own entity — Dash proxies CRUD to Linear's GraphQL API rather than storing them
-locally; the only local state is which Linear project id a task (Calendar event) points at.
+locally; the only local state is which Linear project id (and issue) a task points at.
+Edits to a task's title, due date or priority and ticking it done sync to its Linear issue, one way.
+Deleting a task leaves the issue alone unless you confirm archiving it; it is archived (reversible
+in Linear), never deleted.
+
+**Ctrl/Cmd+K** opens a command palette: jump to a view, add a task, or search tasks, notes,
+Drive and GitHub in one box. **Inbox** merges what needs you today — open tasks, issues assigned
+to you in Linear and PRs awaiting your review — ranked by due date and priority; an issue not yet
+tracked by a task has a *Create task* button that links it instead of filing a new issue.
 
 Spotify scopes now include `playlist-read-private` and `playlist-read-collaborative`.
 **A stored token keeps the scopes it was granted**, so after pulling this change you have to
@@ -158,11 +166,13 @@ to playlists you own or collaborate on: for anyone else's, Spotify returns the m
 | | |
 |---|---|
 | `GET /api/events?days=14&tasks=1` | calendar agenda; `tasks=1` filters to tasks |
-| `POST /api/tasks` | `{title, start, minutes, notes, priority, project}` |
+| `POST /api/tasks` | `{title, start, minutes, notes, priority, project, linearIssue}`; `linearIssue: {id, url, key}` links an existing issue instead of filing one |
 | `PATCH /api/tasks/:id` | `{done}` / `{title}` / `{start, minutes}` / `{priority}` / `{project}` |
-| `DELETE /api/tasks/:id` | |
+| `DELETE /api/tasks/:id` | `?linear=archive` also archives the linked Linear issue |
+| `GET /api/inbox[?refresh=1]` | tasks, assigned Linear issues and review-requested PRs, ranked |
+| `GET /api/search?q=` | command-palette search across the sources you may read |
 | `GET·PUT /api/tasks/:id/subtasks` | checklist per task; `PUT` replaces the whole list |
-| `GET /api/projects?stats=1` | Linear projects; `stats=1` adds `{total, done}` from your Calendar tasks |
+| `GET /api/projects?stats=1` | Linear projects; `stats=1` adds `{total, done}` from your tasks |
 | `POST /api/projects` | `{name, teamIds, color, description, statusId, targetDate}` — proxies to Linear |
 | `PATCH·DELETE /api/projects/:id` | edit / soft-delete (trash) a Linear project |
 | `GET /api/projects/:id/tasks` | this app's tasks tagged with that Linear project |

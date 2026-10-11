@@ -1,4 +1,5 @@
 // Pure helpers, kept out of server.js so test.mjs can import them without booting the server.
+import { allows } from './auth.js';
 
 const NOTE_RE = /^[\w][\w .()'-]{0,80}\.md$/;
 
@@ -62,3 +63,74 @@ export function taskWindow(start, minutes, tz) {
   const mins = Math.min(Math.max(Number(minutes) || 30, 5), 60 * 24);
   return { start: s.toISOString(), end: new Date(s.getTime() + mins * 60000).toISOString() };
 }
+
+/* ---------- command palette search ---------- */
+
+// Which sources a person may search; each maps to the capability that already guards its page.
+export function searchSources(user) {
+  const need = { tasks: ['tasks:read', 'tasks:write'], notes: ['notes:read'], drive: ['drive:read'], github: ['github:read'] };
+  return Object.keys(need).filter((s) => allows(user, ...need[s]));
+}
+
+// Same allow-list the Drive page uses; this string is spliced into a Drive query, so quotes
+// and backslashes must never survive.
+export const driveTerm = (q) => String(q ?? '').trim().split(/[^ 0-9a-zA-Z._-]/).join('');
+
+export const matches = (text, q) => String(text ?? '').toLowerCase().includes(String(q).toLowerCase());
+
+// +-40 chars around the first hit, whitespace collapsed; null when there is no hit.
+export function snippet(text, q) {
+  const s = String(text ?? '');
+  const i = s.toLowerCase().indexOf(String(q).toLowerCase());
+  if (i < 0) return null;
+  return s.slice(Math.max(0, i - 40), i + String(q).length + 40).replace(/\s+/g, ' ').trim();
+}
+
+/* ---------- inbox ---------- */
+
+// Linear: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Dash only has high/med/low.
+const LINEAR_PRIO = { high: 2, med: 3, low: 4 };
+export const prioToLinear = (p) => LINEAR_PRIO[p] ?? 0;
+export const prioFromLinear = (n) => ({ 1: 'high', 2: 'high', 3: 'med', 4: 'low' })[n] ?? null;
+
+// Which fields of a task PATCH go to the linked Linear issue (task -> issue only), or null
+// when nothing syncs. `gBody` is the already-built Google patch, whose `due` is the date.
+export function issuePatch(body, gBody, meta) {
+  if (!meta?.linearId || !(body?.title || body?.start || body?.priority !== undefined)) return null;
+  return {
+    title: gBody.title,
+    dueDate: gBody.due?.slice(0, 10),
+    priority: body.priority !== undefined ? prioToLinear(body.priority) : undefined,
+  };
+}
+
+// An existing issue to mirror, as sent by the client; this goes into task meta and later
+// into Linear mutations, so only the shapes Linear actually produces are accepted.
+export function linearLink(x) {
+  if (!x || typeof x !== 'object') return null;
+  const { id, url, key } = x;
+  if (typeof id !== 'string' || !/^[\w-]{1,64}$/.test(id)) return null;
+  if (typeof url !== 'string' || !/^https:\/\/linear\.app\/\S{1,500}$/.test(url)) return null;
+  if (typeof key !== 'string' || !/^[A-Za-z0-9]{1,16}-\d{1,9}$/.test(key)) return null;
+  return { linearId: id, linearUrl: url, linearKey: key };
+}
+
+// YYYY-MM-DD for `now` in `tz` (process zone when unset).
+export const ymd = (tz, now = new Date()) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: tz || undefined, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+
+// Higher = look at it sooner. `today` is YYYY-MM-DD; item is {due, priority, review}.
+export function inboxScore({ due, priority, review }, today) {
+  let n = { high: 40, med: 20, low: 5 }[priority] || 0;
+  if (review) n += 50;
+  if (due) {
+    const days = Math.round((Date.parse(due.slice(0, 10)) - Date.parse(today)) / 864e5);
+    if (days < 0) n += 100;
+    else if (days === 0) n += 60;
+    else if (days <= 3) n += 30;
+  }
+  return n;
+}
+
+export const inboxOrder = (a, b) =>
+  b.score - a.score || (a.due || '9999').localeCompare(b.due || '9999') || a.title.localeCompare(b.title);

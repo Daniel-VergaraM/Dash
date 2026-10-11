@@ -31,8 +31,10 @@ services:
       # ARP cannot see clients arriving over the internet, so the device route is dead weight
       # on a public host — codes only.
       MAC_LOGIN: "false"
+      # Same path as the dash_data mount below (also the default: WORKDIR /app + data).
+      DATA_DIR: "/app/data"
     volumes:
-      - dash_data:/app/data
+      - dash_data:/app/data   # keep in step with DATA_DIR above
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/me || exit 1"]
       interval: 15s

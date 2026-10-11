@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, fmtDay } from '../../lib/api';
@@ -10,7 +10,9 @@ import ProjectsModal from '../ProjectsModal';
 const PRIORITIES: Priority[] = ['high', 'med', 'low'];
 const rank = (p: Priority | null) => (p ? PRIORITIES.indexOf(p) : PRIORITIES.length);
 
-export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boolean }) {
+export default function Tasks({ active, vimNav, focusReq }: {
+  active: boolean; vimNav: boolean; focusReq?: { id: string } | null;
+}) {
   const { can } = useAuth();
   const [tasks, setTasks] = useState<CalEvent[] | null>(null);
   const [tasksErr, setTasksErr] = useState<ApiError | null>(null);
@@ -59,6 +61,19 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
     if (active) { loadTasks(); loadProjects(); loadLegacy(); }
   }, [active, loadTasks, loadProjects, loadLegacy]);
 
+  // The palette asks for one task: widen the filters so it is listed, then focus its row.
+  const handled = useRef<{ id: string } | null>(null);
+  useEffect(() => {
+    if (!focusReq || handled.current === focusReq || !tasks) return;
+    handled.current = focusReq;
+    setFilterDone('all'); setFilterProject('all'); setFilterPriority('all');
+    setTimeout(() => {
+      const el = document.getElementById('task-' + focusReq.id);
+      el?.scrollIntoView({ block: 'center' });
+      el?.focus();
+    }, 0);
+  }, [focusReq, tasks]);
+
   async function migrateLegacy() {
     setMigrating(true);
     try { await jf('/api/tasks/migrate', { method: 'POST' }); await loadTasks(); await loadLegacy(); }
@@ -94,11 +109,17 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
   const toggleDone = (id: string, done: boolean) => patchTask(id, { done });
   const setPriority = (id: string, priority: Priority | '') => patchTask(id, { priority: priority || null });
   const setProject = (id: string, project: string) => patchTask(id, { project: project || null });
-  async function delTask(id: string, taskTitle: string) {
-    if (!confirm(`Delete "${taskTitle}"?`)) return;
+  async function delTask(t: CalEvent) {
+    if (!confirm(`Delete "${t.title}"?`)) return;
+    // Archiving is opt-in and reversible from Linear; declining leaves the issue untouched.
+    const archive = !!(t.linearKey || t.linearUrl) && confirm(`Also archive Linear issue ${t.linearKey || ''}?`);
     setNotice('');
-    try { await jf('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' }); loadTasks(); }
-    catch (e) { setNotice((e as Error).message); }
+    try {
+      const r = await jf<{ warning?: string | null }>(
+        '/api/tasks/' + encodeURIComponent(t.id) + (archive ? '?linear=archive' : ''), { method: 'DELETE' });
+      if (r.warning) setNotice(r.warning, true);
+      loadTasks();
+    } catch (e) { setNotice((e as Error).message); }
   }
   async function loadSubtasks(id: string) {
     setNotice('');
@@ -229,7 +250,7 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
           : visible.length ? (
             <ul className="list">
               {visible.map((t, i) => (
-                <li key={t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)} style={{ display: 'block' }}>
+                <li key={t.id} id={'task-' + t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)} style={{ display: 'block' }}>
                   <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
                     <input type="checkbox" aria-label={t.title} checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
                     <span className="grow" style={{ flexBasis: 160 }}>
@@ -258,7 +279,7 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
                     <button onClick={() => toggleExpand(t.id)}>
                       {expanded.has(t.id) ? 'Hide subtasks' : subtasks[t.id] ? `Subtasks (${subtasks[t.id].length})` : 'Subtasks'}
                     </button>
-                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t.id, t.title)}><X size={14} /></button>
+                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t)}><X size={14} /></button>
                   </div>
                   {expanded.has(t.id) && (
                     <div style={{ paddingLeft: 30, marginTop: 8 }}>

@@ -7,7 +7,8 @@ import { jf } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
 import type { NoteMeta } from '../../types';
 
-export default function Notes({ active, vimNav }: { active: boolean; vimNav: boolean }) {
+// `openName` is a fresh object per request so asking for the same note twice still fires.
+export default function Notes({ active, vimNav, openName }: { active: boolean; vimNav: boolean; openName?: { name: string } | null }) {
   const { can } = useAuth();
   const canWrite = can('notes:write');
   const [notes, setNotes] = useState<NoteMeta[]>([]);
@@ -60,6 +61,8 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
       setSaveErr('');
     } catch (e) { setSaveErr((e as Error).message); }
   }, [current, body, write]);
+
+  useEffect(() => { if (openName) openNote(openName.name); }, [openName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveNote = useCallback(async () => {
     if (!current || !canWrite) return;
