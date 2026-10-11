@@ -239,6 +239,8 @@ the old name.
 
 **Tables.** GFM tables render in the preview (`| a | b |`, then `|:--|--:|` for left/right and `:-:` for centre alignment). The **Table** button under the editor inserts a 3x3 template; inside a table, **Tab** / **Shift+Tab** jump to the next/previous cell, re-align the columns and add a row after the last cell. Press **Esc** then Tab to leave the editor. In a cell GFM needs the pipe escaped, so write a wiki alias as `[[note\|alias]]`; the preview and the backlinks also accept the unescaped `[[note|alias]]`, but GFM would split the cell there.
 
+**Images.** `![alt](url "title")` renders in the preview for `http:`/`https:` URLs, relative paths and small (<150 KB) `data:image/png|jpeg|gif|webp`; `javascript:` and other schemes are refused and show the alt text instead, as does a broken link. The **Image** button inserts the syntax (selected text becomes the alt, a selected URL becomes the source). URLs only: there is no upload.
+
 ## Deliberately left out
 
 - No task table, no sync engine — Google Calendar *is* the store.

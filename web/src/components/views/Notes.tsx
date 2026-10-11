@@ -1,13 +1,14 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Table as TableIcon } from 'lucide-react';
+import { Image as ImageIcon, Table as TableIcon } from 'lucide-react';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { useAuth } from '../../context/AuthContext';
 import { jf, encodePath } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
 import { insertTable, tabInTable } from '../../lib/mdTable';
+import { insertImage, isSafeImageUrl } from '../../lib/mdImage';
 import type { NoteMeta, NoteDoc } from '../../types';
 
 const stem = (name: string) => name.replace(/\.md$/, '');
@@ -20,6 +21,25 @@ const WIKI = /\[\[([^\]|#\\]+)(?:#[^\]|]*)?(?:\\?\|([^\]]+))?\]\]/g;
 const wikiToLinks = (md: string) => md.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, i) => i % 2 ? part
   : part.replace(WIKI, (_, t: string, alias?: string) =>
     `[${(alias || t).trim()}](#note:${encodeURIComponent(t.trim()).replace(/[()]/g, escape)})`)).join('');
+
+// Only `src` goes through the image allow-list; links keep react-markdown's default filter.
+const urlTransform = (url: string, key: string) =>
+  key === 'src' ? (isSafeImageUrl(url) ? url : '') : defaultUrlTransform(url);
+
+// Image with an accessible fallback: a blocked or broken `src` shows the alt text (and URL)
+// in place, so the layout does not collapse. An empty alt marks the image as decorative.
+function NoteImg({ src, alt, title }: { src?: string; alt?: string; title?: string }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  if (!src || failed) {
+    return (
+      <span className="imgfail" role="img" aria-label={alt ? `Image unavailable: ${alt}` : 'Image unavailable'} title={title}>
+        {alt || 'Image'}{src && !src.startsWith('data:') ? <small> {src}</small> : null}
+      </span>
+    );
+  }
+  return <img src={src} alt={alt ?? ''} title={title} loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+}
 
 // `openName` is a fresh object per request so asking for the same note twice still fires.
 export default function Notes({ active, vimNav, openName }: { active: boolean; vimNav: boolean; openName?: { name: string } | null }) {
@@ -306,11 +326,12 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
         <div className="previewCol">
           <div id="preview" role="region" aria-label="Preview">
             <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}
+              remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={urlTransform}
               components={{
                 a: ({ href, children }) => href?.startsWith('#note:')
                   ? <a href={href} onClick={(e) => { e.preventDefault(); let t = href.slice(6); try { t = decodeURIComponent(t); } catch { /* keep raw */ } openLink(t); }}>{children}</a>
                   : <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+                img: ({ src, alt, title }) => <NoteImg src={src} alt={alt} title={title} />,
                 table: ({ children }) => <div className="tablewrap"><table>{children}</table></div>,
               }}
             >
@@ -337,6 +358,16 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
             el.focus();
           }}
         ><TableIcon size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Table</button>
+        <button
+          disabled={!current || !canWrite}
+          title={canWrite ? 'Insert an image: ![alt](url). Selected text becomes the alt; a selected http(s) URL becomes the source. Only http(s), relative paths and small data:image URLs render.' : 'Requires notes:write'}
+          onClick={() => {
+            const el = editorRef.current;
+            if (!el) return;
+            applyEdit(insertImage(body, el.selectionStart, el.selectionEnd));
+            el.focus();
+          }}
+        ><ImageIcon size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Image</button>
         <button onClick={renameNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Rename / move</button>
         <button onClick={delNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Delete note</button>
       </div>

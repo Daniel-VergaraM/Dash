@@ -123,7 +123,10 @@ label.rowlabel { display: flex; gap: 8px; align-items: center; }
   line-height: 1.6; }
 #preview { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 16px 20px; overflow: auto; }
-#preview img { max-width: 100%; }
+#preview img { max-width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--line); vertical-align: middle; }
+#preview .imgfail { display: inline-block; max-width: 100%; padding: 4px 8px; border: 1px dashed var(--line);
+  border-radius: 6px; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+#preview .imgfail small { opacity: .75; }
 #preview pre { background: var(--panel2); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
 #preview code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
 #preview .tablewrap { overflow-x: auto; margin: 0 0 1em; max-width: 100%; }
