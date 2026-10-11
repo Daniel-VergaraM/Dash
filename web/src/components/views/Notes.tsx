@@ -2,18 +2,28 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import { useAuth } from '../../context/AuthContext';
 import { jf } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
 import type { NoteMeta } from '../../types';
 
 export default function Notes({ active, vimNav }: { active: boolean; vimNav: boolean }) {
+  const { can } = useAuth();
+  const canWrite = can('notes:write');
   const [notes, setNotes] = useState<NoteMeta[]>([]);
+  const [notesLoaded, setNotesLoaded] = useState(false);
+  const [notesErr, setNotesErr] = useState('');
+  const [saveErr, setSaveErr] = useState('');
   const [current, setCurrent] = useState<string | null>(null);
   const [body, setBody] = useState('');
   const [previewBody, setPreviewBody] = useState('');
   const [status, setStatus] = useState('');
 
-  const listNotes = useCallback(async () => setNotes(await jf<NoteMeta[]>('/api/notes')), []);
+  const listNotes = useCallback(async () => {
+    try { setNotes(await jf<NoteMeta[]>('/api/notes')); setNotesErr(''); }
+    catch (e) { setNotesErr((e as Error).message); }
+    finally { setNotesLoaded(true); }
+  }, []);
 
   useEffect(() => { if (active) listNotes(); }, [active, listNotes]);
 
@@ -28,8 +38,11 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
   const savedRef = useRef('');
 
   const write = useCallback(async (name: string, text: string) => {
-    await jf('/api/notes/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ body: text }) });
+    try {
+      await jf('/api/notes/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ body: text }) });
+    } catch (e) { setSaveErr((e as Error).message); throw e; }
     savedRef.current = text;
+    setSaveErr('');
     setStatus(name + ' · saved ' + new Date().toLocaleTimeString());
     listNotes();
   }, [listNotes]);
@@ -37,20 +50,23 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
   const openNote = useCallback(async (name: string) => {
     // Switching away cancels the pending autosave, so anything still unsaved has to go now
     // or it is lost silently.
-    if (current && current !== name && body !== savedRef.current) await write(current, body);
-    const n = await jf<{ name: string; body: string }>('/api/notes/' + encodeURIComponent(name));
-    setCurrent(n.name);
-    setBody(n.body);
-    savedRef.current = n.body;
-    setStatus(n.name);
+    try {
+      if (current && current !== name && body !== savedRef.current) await write(current, body);
+      const n = await jf<{ name: string; body: string }>('/api/notes/' + encodeURIComponent(name));
+      setCurrent(n.name);
+      setBody(n.body);
+      savedRef.current = n.body;
+      setStatus(n.name);
+      setSaveErr('');
+    } catch (e) { setSaveErr((e as Error).message); }
   }, [current, body, write]);
 
   const saveNote = useCallback(async () => {
-    if (!current) return;
-    await write(current, body);
-  }, [current, body, write]);
+    if (!current || !canWrite) return;
+    try { await write(current, body); } catch { /* surfaced in the status line */ }
+  }, [current, body, write, canWrite]);
 
-  const dirty = !!current && body !== savedRef.current;
+  const dirty = !!current && canWrite && body !== savedRef.current;
 
   // Autosave: 5s after the last keystroke. Every edit re-runs this effect, and the cleanup
   // cancels the previous timer, so the clock restarts while you are still typing.
@@ -86,13 +102,14 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
       });
       openNote(name);
       listNotes();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setSaveErr((e as Error).message); }
   }
 
   async function delNote() {
     if (!current || !confirm('Delete ' + current + '?')) return;
-    await jf('/api/notes/' + encodeURIComponent(current), { method: 'DELETE' });
-    setCurrent(null); setBody('');
+    try { await jf('/api/notes/' + encodeURIComponent(current), { method: 'DELETE' }); }
+    catch (e) { setSaveErr((e as Error).message); return; }
+    setCurrent(null); setBody(''); setStatus(''); setSaveErr('');
     listNotes();
   }
 
@@ -107,40 +124,41 @@ export default function Notes({ active, vimNav }: { active: boolean; vimNav: boo
 
   return (
     <>
-      <h2>Notes <span className="muted small">markdown + $\LaTeX$ &mdash; autosaves 5s after you stop typing, or Ctrl+S</span></h2>
+      <h2>Notes <span className="muted small">markdown + $\LaTeX$ &mdash; {canWrite ? 'autosaves 5s after you stop typing, or Ctrl+S' : 'Read-only'}</span></h2>
       <div id="notesWrap">
         <div>
-          <button className="primary" style={{ width: '100%', marginBottom: 8 }} onClick={newNote}>+ New note</button>
+          <button className="primary" style={{ width: '100%', marginBottom: 8 }} onClick={newNote} disabled={!canWrite} title={canWrite ? undefined : 'Requires notes:write'}>+ New note</button>
           <div id="noteList">
             {notes.length ? notes.map((n, i) => (
               <button
                 key={n.name} ref={rowRef(i)} onKeyDown={(e) => onKeyDown(e, i)}
-                className={n.name === current ? 'on' : ''} onClick={() => openNote(n.name)}
+                className={n.name === current ? 'on' : ''} aria-current={n.name === current || undefined} onClick={() => openNote(n.name)}
               >
                 {n.name.replace(/\.md$/, '')}
               </button>
-            )) : <p className="muted small">No notes yet.</p>}
+            )) : notesErr ? <p className="err small" role="alert">{notesErr}</p>
+              : <p className="muted small">{notesLoaded ? 'No notes yet.' : 'Loading…'}</p>}
           </div>
         </div>
         <textarea
-          id="editor" ref={editorRef} value={body} onChange={(e) => setBody(e.target.value)}
+          id="editor" ref={editorRef} value={body} aria-label="Note editor" readOnly={!current || !canWrite} onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => {
             if (!vimNav || e.key !== 'Escape') return;
             e.preventDefault();
             const idx = notes.findIndex((n) => n.name === current);
             if (idx >= 0) focusAt(idx);
           }}
-          placeholder={'# Title\n\nInline math $e^{i\\pi}+1=0$, or display:\n\n$$\\int_0^\\infty e^{-x^2}dx = \\frac{\\sqrt\\pi}{2}$$'}
+          placeholder={!current ? (canWrite ? 'Select a note, or create one with + New note.' : 'Select a note to read it.') : '# Title\n\nInline math $e^{i\\pi}+1=0$, or display:\n\n$$\\int_0^\\infty e^{-x^2}dx = \\frac{\\sqrt\\pi}{2}$$'}
         />
-        <div id="preview">
+        <div id="preview" role="region" aria-label="Preview">
           <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
             {previewBody}
           </ReactMarkdown>
         </div>
       </div>
       <div className="row small muted" style={{ marginTop: 8 }}>
-        <span>{dirty ? current + ' · unsaved…' : status}</span>
-        <button style={{ marginLeft: 'auto' }} onClick={delNote}>Delete note</button>
+        {saveErr ? <span className="err" role="alert">{saveErr}</span> : <span>{dirty ? current + ' · unsaved…' : status}</span>}
+        <button style={{ marginLeft: 'auto' }} onClick={delNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Delete note</button>
       </div>
     </>
   );

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Lock, Pause, Play, SkipBack, SkipForward } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, ago, mmss } from '../../lib/api';
 import type { ApiError, SpotifyPlaylist, SpotifyTrack } from '../../types';
@@ -94,11 +95,11 @@ export default function MusicView({ active, vimNav }: { active: boolean; vimNav:
         </div>
         {playable && (
           <div className="row" style={{ marginTop: 14 }}>
-            <button aria-label="Previous track" onClick={() => cmd('previous')}>⏮</button>
-            <button aria-label="Play" onClick={() => cmd('play')}>▶</button>
-            <button aria-label="Pause" onClick={() => cmd('pause')}>⏸</button>
-            <button aria-label="Next track" onClick={() => cmd('next')}>⏭</button>
-            <span className="err small">{spErr}</span>
+            <button aria-label="Previous track" onClick={() => cmd('previous')}><SkipBack size={14} /></button>
+            <button aria-label="Play" onClick={() => cmd('play')}><Play size={14} /></button>
+            <button aria-label="Pause" onClick={() => cmd('pause')}><Pause size={14} /></button>
+            <button aria-label="Next track" onClick={() => cmd('next')}><SkipForward size={14} /></button>
+            <span className="err small" role="alert">{spErr}</span>
           </div>
         )}
       </div>
@@ -117,12 +118,12 @@ export default function MusicView({ active, vimNav }: { active: boolean; vimNav:
                 const locked = p.mine === false && !p.collaborative;
                 return (
                   <button key={p.id} ref={plRowRef(i)} onKeyDown={(e) => plOnKeyDown(e, i)}
-                    className={p.id === openPlaylist ? 'on' : ''}
+                    className={p.id === openPlaylist ? 'on' : ''} aria-current={p.id === openPlaylist || undefined}
                     title={locked ? 'Spotify only serves playlists you own or collaborate on' : ''}
                     onClick={() => openList(p)}>
                     <img src={p.image} alt="" />
                     <span className="grow ellip">
-                      {locked ? '🔒 ' : ''}{p.name}
+                      {locked && <Lock size={12} aria-label="Not readable" style={{ verticalAlign: '-1px', marginRight: 4 }} />}{p.name}
                       <div className="muted small">{p.tracks} tracks{p.owner ? ' · ' + p.owner : ''}</div>
                     </span>
                   </button>
@@ -132,39 +133,44 @@ export default function MusicView({ active, vimNav }: { active: boolean; vimNav:
         </div>
         <div className="card" style={{ overflow: 'auto' }}>
           <h3>{openPlaylist ? plTitle : 'Recently played'}</h3>
-          <ul className="list" id="trackList">
-            {tracksErr ? <p className="err">{tracksErr}</p>
-              : openPlaylist ? (
-                tracks === null ? <p className="muted">Loading…</p>
-                : tracks.length ? tracks.map((tr, i) => (
-                  <li
-                    key={tr.uri + i}
-                    ref={playable ? trRowRef(i) : undefined}
-                    tabIndex={playable ? 0 : undefined}
-                    className={playable ? 'play' : ''} title={playable ? 'Play' : ''}
-                    onClick={() => playable && playTrack(tr)}
-                    onKeyDown={playable ? (e) => {
-                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); playTrack(tr); return; }
-                      trOnKeyDown(e, i);
-                    } : undefined}
-                  >
-                    <span className="muted small" style={{ width: 24, flex: 'none', textAlign: 'right' }}>{i + 1}</span>
-                    <img src={tr.image} alt="" />
-                    <span className="grow ellip">{tr.name}<div className="muted small ellip">{tr.artists}</div></span>
-                    <span className="muted small">{mmss(tr.ms)}</span>
+          {tracksErr ? <p className="err" role="alert">{tracksErr}</p>
+            : openPlaylist ? (
+              tracks === null ? <p className="muted">Loading…</p>
+              : tracks.length ? (
+                <ul className="list" id="trackList">
+                  {tracks.map((tr, i) => (
+                    <li
+                      key={tr.uri + i}
+                      ref={playable ? trRowRef(i) : undefined}
+                      tabIndex={playable ? 0 : undefined}
+                      className={playable ? 'play' : ''} title={playable ? 'Play' : ''}
+                      onClick={() => playable && playTrack(tr)}
+                      onKeyDown={playable ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); playTrack(tr); return; }
+                        trOnKeyDown(e, i);
+                      } : undefined}
+                    >
+                      <span className="muted small" style={{ width: 24, flex: 'none', textAlign: 'right' }}>{i + 1}</span>
+                      <img src={tr.image} alt="" />
+                      <span className="grow ellip">{tr.name}<div className="muted small ellip">{tr.artists}</div></span>
+                      <span className="muted small">{mmss(tr.ms)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : !readable
+                ? <p className="muted">Spotify only lets this app read playlists you own or collaborate on. This one belongs to someone else, so its tracks are not available.</p>
+                : <p className="muted">This playlist is empty.</p>
+            ) : data === null ? (err ? null : <p className="muted">Loading…</p>)
+            : data.recent.length ? (
+              <ul className="list" id="trackList">
+                {data.recent.map((r, i) => (
+                  <li key={i}>
+                    <span className="grow ellip">{r.track.name} <span className="muted">— {r.track.artists[0]?.name || ''}</span></span>
+                    <span className="muted small">{ago(r.played_at)}</span>
                   </li>
-                )) : (
-                  !readable
-                    ? <p className="muted">Spotify only lets this app read playlists you own or collaborate on. This one belongs to someone else, so its tracks are not available.</p>
-                    : <p className="muted">This playlist is empty.</p>
-                )
-              ) : data?.recent.length ? data.recent.map((r, i) => (
-                <li key={i}>
-                  <span className="grow ellip">{r.track.name} <span className="muted">— {r.track.artists[0]?.name || ''}</span></span>
-                  <span className="muted small">{ago(r.played_at)}</span>
-                </li>
-              )) : <p className="muted">Nothing recent.</p>}
-          </ul>
+                ))}
+              </ul>
+            ) : <p className="muted">Nothing recent.</p>}
         </div>
       </div>
     </>

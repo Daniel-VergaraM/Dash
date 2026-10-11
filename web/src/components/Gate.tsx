@@ -55,11 +55,11 @@ export default function Gate() {
         <h1>Dash</h1>
         <p>Sign in to continue</p>
         <input
-          id="loginName" placeholder="Name" autoComplete="username" autoFocus
+          id="loginName" aria-label="Name" placeholder="Name" autoComplete="username" autoFocus
           value={name} onChange={(e) => setName(e.target.value)}
         />
         <input
-          id="loginPass" type="password" placeholder="Password" autoComplete="current-password"
+          id="loginPass" type="password" aria-label="Password" placeholder="Password" autoComplete="current-password"
           value={password} onChange={(e) => setPassword(e.target.value)}
         />
         <button className="primary" type="submit">Sign in</button>
@@ -69,7 +69,7 @@ export default function Gate() {
             <button type="button" onClick={onPasskey}>Use a passkey</button>
           </>
         )}
-        <div id="gateErr">{err}</div>
+        <div id="gateErr" role="alert">{err}</div>
       </form>
     </div>
   );

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, fmtDay } from '../../lib/api';
 import type { ApiError, CalEvent } from '../../types';
@@ -26,6 +27,9 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
   const [when, setWhen] = useState(defaultWhen);
   const [mins, setMins] = useState(30);
   const [addErr, setAddErr] = useState('');
+  // Failures of row actions, and the "saved but Linear did not" warning.
+  const [notice, setNoticeState] = useState<{ text: string; warn: boolean } | null>(null);
+  const setNotice = (text: string, warn = false) => setNoticeState(text ? { text, warn } : null);
 
   const loadTasks = useCallback(async () => {
     try { setTasks(await jf<CalEvent[]>('/api/tasks')); setTasksErr(null); }
@@ -63,27 +67,31 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
 
   async function toggleDone(id: string, done: boolean) {
     try {
-      await jf('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ done }) });
+      setNotice('');
+      const updated = await jf<CalEvent>('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ done }) });
+      if (updated.warning) setNotice(updated.warning, true);
       loadTasks();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setNotice((e as Error).message); }
   }
 
   async function delTask(id: string, title: string) {
     if (!confirm(`Delete "${title}"?`)) return;
+    setNotice('');
     try {
       await jf('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' });
       loadTasks();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setNotice((e as Error).message); }
   }
 
   async function clearCompleted() {
     const done = (tasks || []).filter((t) => t.done);
     if (!done.length) return;
     if (!confirm(`Clear ${done.length} completed task${done.length > 1 ? 's' : ''}?`)) return;
+    setNotice('');
     try {
       await Promise.all(done.map((t) => jf('/api/tasks/' + encodeURIComponent(t.id), { method: 'DELETE' })));
       loadTasks();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setNotice((e as Error).message); }
   }
 
   const { rowRef, onKeyDown } = useListNav(tasks?.length ?? 0, vimNav);
@@ -97,29 +105,32 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
             <h3>Schedule a task</h3>
             {can('tasks:write') && (
               <div className="row" style={{ gap: 6 }}>
-                <input className="grow" style={{ minWidth: 160 }} placeholder="What needs doing?"
+                <input className="grow" style={{ minWidth: 160 }} placeholder="What needs doing?" aria-label="Task"
                   value={title} onChange={(e) => setTitle(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addTask()} />
-                <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+                <input type="datetime-local" aria-label="When" value={when} onChange={(e) => setWhen(e.target.value)} />
                 <input type="number" min={5} step={5} title="minutes" style={{ width: 72 }}
                   value={mins} onChange={(e) => setMins(Number(e.target.value))} />
                 <button className="primary" onClick={addTask}>Add</button>
               </div>
             )}
-            <div className="err small" style={{ marginTop: 6 }}>{addErr}</div>
-            <ul className="list" style={{ marginTop: 12 }}>
-              {tasks === null ? (tasksErr ? <ConnectBox provider="google" err={tasksErr} /> : null)
-                : tasks.length ? tasks.map((t, i) => (
+            <div className="err small" role="alert" style={{ marginTop: 6 }}>{addErr}</div>
+            {notice && <p className={'small ' + (notice.warn ? 'muted' : 'err')} role={notice.warn ? 'status' : 'alert'} style={{ margin: '6px 0 0' }}>{notice.text}</p>}
+            {tasks === null ? (tasksErr ? <ConnectBox provider="google" err={tasksErr} /> : <p className="muted">Loading…</p>)
+              : tasks.length ? (
+              <ul className="list" style={{ marginTop: 12 }}>
+                {tasks.map((t, i) => (
                   <li key={t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)}>
-                    <input type="checkbox" checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
+                    <input type="checkbox" aria-label={t.title} checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
                     <span className={'grow' + (t.done ? ' done' : '')}>
                       {t.title}
                       <div className="muted small">{fmtDay(t.start)} · {t.allDay ? 'all day' : new Date(t.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</div>
                     </span>
-                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t.id, t.title)}>✕</button>
+                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t.id, t.title)}><X size={14} /></button>
                   </li>
-                )) : <p className="muted">No tasks yet.</p>}
-            </ul>
+                ))}
+              </ul>
+            ) : <p className="muted">No tasks yet.</p>}
             {tasks && tasks.some((t) => t.done) && (
               <button style={{ marginTop: 10 }} onClick={clearCompleted}>Clear completed</button>
             )}
@@ -142,7 +153,7 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
               ? (nowErr ? <ConnectBox provider="spotify" err={nowErr} /> : <p className="muted">Loading…</p>)
               : now.item ? (
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <img src={now.item.album.images.at(-1)?.url || ''} alt="" width={56} height={56} style={{ borderRadius: 6 }} />
+                  <img src={now.item.album.images.at(-1)?.url || ''} alt="" width={56} height={56} style={{ borderRadius: 'var(--radius-sm)', flex: 'none' }} />
                   <div className="grow">
                     <b>{now.item.name}</b>
                     <div className="muted">{now.item.artists.map((a: any) => a.name).join(', ')}</div>

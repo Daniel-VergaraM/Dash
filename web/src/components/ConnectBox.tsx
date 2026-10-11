@@ -6,7 +6,7 @@ export default function ConnectBox({ provider, err }: { provider: 'google' | 'sp
     return (
       <div className="connect">
         <p className="muted">{err.message}</p>
-        <a href={`/auth/${provider}`}><button className="primary">Connect {provider}</button></a>
+        <button className="primary" onClick={() => { window.location.href = `/auth/${provider}`; }}>Connect {provider}</button>
       </div>
     );
   }

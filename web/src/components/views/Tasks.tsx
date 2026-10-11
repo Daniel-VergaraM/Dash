@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { jf, fmtDay } from '../../lib/api';
 import type { ApiError, CalEvent, Priority, Project, Subtask } from '../../types';
@@ -30,6 +31,9 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
   const [newPriority, setNewPriority] = useState<Priority | ''>('');
   const [newProject, setNewProject] = useState('');
   const [addErr, setAddErr] = useState('');
+  // Failures of row actions, and the "task saved but Linear did not" warning.
+  const [notice, setNoticeState] = useState<{ text: string; warn: boolean } | null>(null);
+  const setNotice = (text: string, warn = false) => setNoticeState(text ? { text, warn } : null);
 
   const loadTasks = useCallback(async () => {
     try { setTasks(await jf<CalEvent[]>('/api/tasks')); setTasksErr(null); }
@@ -65,47 +69,43 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
   async function addTask() {
     setAddErr('');
     try {
-      await jf('/api/tasks', {
+      setNotice('');
+      const created = await jf<CalEvent>('/api/tasks', {
         method: 'POST',
         body: JSON.stringify({
           title, start: when || new Date().toISOString(), minutes: mins,
           priority: newPriority || undefined, project: newProject || undefined,
         }),
       });
+      if (created.warning) setNotice(created.warning, true);
       setTitle(''); setNewPriority(''); setNewProject('');
       loadTasks();
     } catch (e) { setAddErr((e as Error).message); }
   }
 
-  async function toggleDone(id: string, done: boolean) {
+  async function patchTask(id: string, body: Record<string, unknown>) {
+    setNotice('');
     try {
-      const updated = await jf<CalEvent>('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ done }) });
+      const updated = await jf<CalEvent>('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(body) });
       setTasks((prev) => (prev || []).map((t) => (t.id === id ? updated : t)));
-    } catch (e) { alert((e as Error).message); }
+      if (updated.warning) setNotice(updated.warning, true);
+    } catch (e) { setNotice((e as Error).message); }
   }
+  const toggleDone = (id: string, done: boolean) => patchTask(id, { done });
+  const setPriority = (id: string, priority: Priority | '') => patchTask(id, { priority: priority || null });
+  const setProject = (id: string, project: string) => patchTask(id, { project: project || null });
   async function delTask(id: string, taskTitle: string) {
     if (!confirm(`Delete "${taskTitle}"?`)) return;
+    setNotice('');
     try { await jf('/api/tasks/' + encodeURIComponent(id), { method: 'DELETE' }); loadTasks(); }
-    catch (e) { alert((e as Error).message); }
+    catch (e) { setNotice((e as Error).message); }
   }
-  async function setPriority(id: string, priority: Priority | '') {
-    try {
-      const updated = await jf<CalEvent>('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ priority: priority || null }) });
-      setTasks((prev) => (prev || []).map((t) => (t.id === id ? updated : t)));
-    } catch (e) { alert((e as Error).message); }
-  }
-  async function setProject(id: string, project: string) {
-    try {
-      const updated = await jf<CalEvent>('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ project: project || null }) });
-      setTasks((prev) => (prev || []).map((t) => (t.id === id ? updated : t)));
-    } catch (e) { alert((e as Error).message); }
-  }
-
   async function loadSubtasks(id: string) {
+    setNotice('');
     try {
       const list = await jf<Subtask[]>('/api/tasks/' + encodeURIComponent(id) + '/subtasks');
       setSubtasksState((prev) => ({ ...prev, [id]: list }));
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setNotice((e as Error).message); }
   }
   function toggleExpand(id: string) {
     setExpanded((prev) => {
@@ -116,10 +116,11 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
     });
   }
   async function saveSubtasks(id: string, list: Subtask[]) {
+    setNotice('');
     try {
       const saved = await jf<Subtask[]>('/api/tasks/' + encodeURIComponent(id) + '/subtasks', { method: 'PUT', body: JSON.stringify({ subtasks: list }) });
       setSubtasksState((prev) => ({ ...prev, [id]: saved }));
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setNotice((e as Error).message); }
   }
   const toggleSubtaskDone = (taskId: string, subId: string) =>
     saveSubtasks(taskId, (subtasks[taskId] || []).map((s) => (s.id === subId ? { ...s, done: !s.done } : s)));
@@ -172,21 +173,21 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
         <div className="card">
           <h3>Filter & sort</h3>
           <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-            <select value={filterDone} onChange={(e) => setFilterDone(e.target.value as typeof filterDone)}>
+            <select aria-label="State" value={filterDone} onChange={(e) => setFilterDone(e.target.value as typeof filterDone)}>
               <option value="open">Open</option>
               <option value="done">Done</option>
               <option value="all">All</option>
             </select>
-            <select value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
+            <select aria-label="Project" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
               <option value="all">All projects</option>
               <option value="none">No project</option>
               {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
-            <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)}>
+            <select aria-label="Priority" value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)}>
               <option value="all">All priorities</option>
               {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
-            <select value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)}>
+            <select aria-label="Sort" value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)}>
               <option value="date">Sort: date</option>
               <option value="priority">Sort: priority</option>
             </select>
@@ -197,10 +198,10 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
           <div className="card">
             <h3>New task</h3>
             <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-              <input className="grow" style={{ minWidth: 160 }} placeholder="What needs doing?"
+              <input className="grow" style={{ minWidth: 160 }} placeholder="What needs doing?" aria-label="Task"
                 value={title} onChange={(e) => setTitle(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addTask()} />
-              <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+              <input type="datetime-local" aria-label="When" value={when} onChange={(e) => setWhen(e.target.value)} />
               <input type="number" min={5} step={5} title="minutes" style={{ width: 72 }}
                 value={mins} onChange={(e) => setMins(Number(e.target.value))} />
               <select value={newPriority} onChange={(e) => setNewPriority(e.target.value as Priority | '')} title="Priority">
@@ -215,13 +216,14 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
               )}
               <button className="primary" onClick={addTask}>Add</button>
             </div>
-            <div className="err small" style={{ marginTop: 6 }}>{addErr}</div>
+            <div className="err small" role="alert" style={{ marginTop: 6 }}>{addErr}</div>
           </div>
         )}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>Tasks</h3>
+        {notice && <p className={'small ' + (notice.warn ? 'muted' : 'err')} role={notice.warn ? 'status' : 'alert'} style={{ marginTop: -6 }}>{notice.text}</p>}
         {tasks === null
           ? (tasksErr ? <ConnectBox provider="google" err={tasksErr} /> : <p className="muted">Loading…</p>)
           : visible.length ? (
@@ -229,8 +231,8 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
               {visible.map((t, i) => (
                 <li key={t.id} ref={rowRef(i)} tabIndex={vimNav ? 0 : -1} onKeyDown={(e) => onKeyDown(e, i)} style={{ display: 'block' }}>
                   <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
-                    <input type="checkbox" checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
-                    <span className="grow" style={{ minWidth: 0 }}>
+                    <input type="checkbox" aria-label={t.title} checked={t.done} onChange={(e) => toggleDone(t.id, e.target.checked)} />
+                    <span className="grow" style={{ flexBasis: 160 }}>
                       <span className={t.done ? 'done' : ''}>{t.title}</span>
                       <div className="muted small">
                         {fmtDay(t.start)} · {t.allDay ? 'all day' : new Date(t.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
@@ -256,7 +258,7 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
                     <button onClick={() => toggleExpand(t.id)}>
                       {expanded.has(t.id) ? 'Hide subtasks' : subtasks[t.id] ? `Subtasks (${subtasks[t.id].length})` : 'Subtasks'}
                     </button>
-                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t.id, t.title)}>✕</button>
+                    <button className="x" aria-label={`Delete "${t.title}"`} onClick={() => delTask(t.id, t.title)}><X size={14} /></button>
                   </div>
                   {expanded.has(t.id) && (
                     <div style={{ paddingLeft: 30, marginTop: 8 }}>
@@ -264,9 +266,9 @@ export default function Tasks({ active, vimNav }: { active: boolean; vimNav: boo
                         <ul className="list">
                           {subtasks[t.id].map((s) => (
                             <li key={s.id}>
-                              <input type="checkbox" checked={s.done} onChange={() => toggleSubtaskDone(t.id, s.id)} />
+                              <input type="checkbox" aria-label={s.title} checked={s.done} onChange={() => toggleSubtaskDone(t.id, s.id)} />
                               <span className={'grow small' + (s.done ? ' done' : '')}>{s.title}</span>
-                              <button className="x" aria-label={`Remove "${s.title}"`} onClick={() => removeSubtask(t.id, s.id)}>✕</button>
+                              <button className="x" aria-label={`Remove "${s.title}"`} onClick={() => removeSubtask(t.id, s.id)}><X size={14} /></button>
                             </li>
                           ))}
                         </ul>
@@ -297,7 +299,7 @@ function SubtaskAdder({ onAdd }: { onAdd: (text: string) => void }) {
   return (
     <div className="row" style={{ gap: 6, marginTop: 6 }}>
       <input
-        className="grow small" placeholder="Add subtask" value={text}
+        className="grow small" placeholder="Add subtask" aria-label="Add subtask" value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && submit()}
       />

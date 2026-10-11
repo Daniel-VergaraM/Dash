@@ -22,10 +22,16 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
   const [device, setDevice] = useState<{ ip: string; mac: string; local: boolean } | null>(null);
   const [editing, setEditing] = useState<AccessUser | null | undefined>(undefined); // undefined = modal closed
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
-    setAccess(await jf<AccessData>('/api/access'));
-    setDevice(await jf('/api/access/device'));
+    try {
+      setAccess(await jf<AccessData>('/api/access'));
+      setDevice(await jf('/api/access/device'));
+      setErr('');
+    } catch (e) { setErr((e as Error).message); }
+    finally { setLoaded(true); }
   }, []);
 
   useEffect(() => { if (active) load(); }, [active, load]);
@@ -54,7 +60,7 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
       await Promise.all(ids.map((id) => jf('/api/access/users/' + id, { method: 'PATCH', body: JSON.stringify({ disabled }) })));
       setSelected(new Set());
       load();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setErr((e as Error).message); }
   }
 
   async function remove() {
@@ -63,7 +69,7 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
       await jf('/api/access/users/' + editing.id, { method: 'DELETE' });
       setEditing(undefined);
       load();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { setErr((e as Error).message); }
   }
 
   const { rowRef, onKeyDown } = useListNav(access.users.length, vimNav, {
@@ -78,6 +84,8 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
       <h2>Access</h2>
       <div className="card">
         <h3>People</h3>
+        {err && <p className="err small" role="alert" style={{ marginTop: -6 }}>{err}</p>}
+        {!loaded && !err && <p className="muted">Loading…</p>}
         <div>
           {access.users.map((u, i) => (
             <div
@@ -104,7 +112,7 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
                   {u.lastSeen ? ' · last seen ' + ago(u.lastSeen) : ''}
                 </div>
               </div>
-              <button onClick={() => setEditing(u)}>Edit</button>
+              <button aria-label={`Edit ${u.name}`} onClick={() => setEditing(u)}>Edit</button>
             </div>
           ))}
         </div>
@@ -135,18 +143,20 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>Recent sign-in activity</h3>
-        <ul className="list">
-          {access.audit.length ? access.audit.map((a, i) => (
-            <li key={i}>
-              <span className="grow">
-                {AUDIT_LABEL[a.event] || a.event} <span className="muted">{a.name || a.by || a.provider || ''}</span>
-                {a.via && <span className="muted small"> · via {a.via}</span>}
-                {a.ip && <span className="muted small"> · {a.ip}</span>}
-              </span>
-              <span className="muted small">{ago(a.at)}</span>
-            </li>
-          )) : <p className="muted">Nothing logged yet.</p>}
-        </ul>
+        {access.audit.length ? (
+          <ul className="list">
+            {access.audit.map((a, i) => (
+              <li key={i}>
+                <span className="grow">
+                  {AUDIT_LABEL[a.event] || a.event} <span className="muted">{a.name || a.by || a.provider || ''}</span>
+                  {a.via && <span className="muted small"> · via {a.via}</span>}
+                  {a.ip && <span className="muted small"> · {a.ip}</span>}
+                </span>
+                <span className="muted small">{ago(a.at)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : loaded && !err && <p className="muted">Nothing logged yet.</p>}
       </div>
 
       {editing !== undefined && (

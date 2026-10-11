@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import { jf, ago } from '../../lib/api';
 import type { ApiError, DriveFile } from '../../types';
 import { useListNav } from '../../lib/useListNav';
@@ -62,13 +63,13 @@ export default function Drive({ active, vimNav }: { active: boolean; vimNav: boo
     <>
       <h2>Drive</h2>
       <div className="row">
-        <input className="grow" placeholder="Search all files…" value={query}
+        <input className="grow" placeholder="Search all files…" aria-label="Search all files" value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && load(query, path)} />
         <button onClick={() => load(query, path)}>Search</button>
         <button onClick={goHome}>My Drive</button>
       </div>
-      <div id="crumbs" className="row small muted" style={{ margin: '10px 0 4px' }}>
+      <div id="crumbs" className="row small muted" role="navigation" aria-label="Folder path" style={{ margin: '10px 0 4px' }}>
         {searching ? <span>Search results</span> : path.map((p, i) => (
           <span key={p.id}>
             {i > 0 && <span>/</span>}
@@ -78,38 +79,40 @@ export default function Drive({ active, vimNav }: { active: boolean; vimNav: boo
       </div>
       <div id="driveWrap">
         <div className="card" style={{ overflow: 'auto' }}>
-          <ul className="list" id="driveFiles">
-            {files === null
-              ? (err ? <ConnectBox provider="google" err={err} /> : <p className="muted">Loading…</p>)
-              : files.length ? files.map((f, i) => (
-                <li key={f.id} className={selected?.id === f.id ? 'on' : ''}>
-                  <img src={f.iconLink || ''} alt="" />
-                  <span className="grow ellip">
-                    <a
-                      ref={rowRef(i)} tabIndex={0} role="button"
-                      onClick={() => activate(f)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(f); return; }
-                        onKeyDown(e, i);
-                      }}
-                    >{f.name}</a>
-                    <div className="muted small">
-                      {f.folder ? 'folder' : f.mimeType.split('.').pop()} · {ago(f.modifiedTime)}
-                    </div>
-                  </span>
-                </li>
-              )) : <p className="muted">This folder is empty.</p>}
-          </ul>
+          {files === null
+            ? (err ? <ConnectBox provider="google" err={err} /> : <p className="muted">Loading…</p>)
+            : files.length ? (
+              <ul className="list" id="driveFiles">
+                {files.map((f, i) => (
+                    <li key={f.id} className={selected?.id === f.id ? 'on' : ''}>
+                      <img src={f.iconLink || ''} alt="" />
+                      <span className="grow ellip">
+                        <a
+                          ref={rowRef(i)} tabIndex={0} role="button" aria-current={selected?.id === f.id || undefined}
+                          onClick={() => activate(f)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(f); return; }
+                            onKeyDown(e, i);
+                          }}
+                        >{f.name}</a>
+                        <div className="muted small">
+                          {f.folder ? 'folder' : f.mimeType.split('.').pop()} · {ago(f.modifiedTime)}
+                        </div>
+                      </span>
+                    </li>
+                ))}
+              </ul>
+            ) : <p className="muted">{searching ? 'No files match.' : 'This folder is empty.'}</p>}
         </div>
         <div className="card" id="dvPane" style={{ display: 'flex', flexDirection: 'column' }}>
           <div className="row" style={{ marginBottom: 10 }}>
             <b className="grow ellip">{selected?.name || 'Preview'}</b>
             {selected?.webViewLink && (
-              <a className="small" href={selected.webViewLink} target="_blank" rel="noreferrer">open in Drive ↗</a>
+              <a className="small" href={selected.webViewLink} target="_blank" rel="noreferrer">open in Drive <ExternalLink size={12} aria-hidden style={{ verticalAlign: '-1px' }} /></a>
             )}
           </div>
           {selected ? (
-            <iframe id="dv" referrerPolicy="no-referrer" src={`/api/drive/${encodeURIComponent(selected.id)}/preview`} />
+            <iframe id="dv" title={selected.name} referrerPolicy="no-referrer" src={`/api/drive/${encodeURIComponent(selected.id)}/preview`} />
           ) : (
             <div className="muted" style={{ margin: 'auto', textAlign: 'center', padding: 40 }}>
               Pick a file to view it here.

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { jf, ago } from '../../lib/api';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
 import { useAuth } from '../../context/AuthContext';
@@ -38,7 +39,10 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
   const [pwConfirm, setPwConfirm] = useState('');
   const [pwMsg, setPwMsg] = useState<{ text: string; ok?: boolean } | null>(null);
 
-  const loadKeys = useCallback(async () => setKeys(await jf<Passkey[]>('/api/passkeys')), []);
+  const loadKeys = useCallback(async () => {
+    try { setKeys(await jf<Passkey[]>('/api/passkeys')); }
+    catch (e) { setPkMsg({ text: (e as Error).message }); }
+  }, []);
   useEffect(() => { if (active) loadKeys(); }, [active, loadKeys]);
 
   async function onPwSubmit(e: React.FormEvent) {
@@ -89,14 +93,14 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
         <div className="card">
           <h3>Change your password</h3>
           <form onSubmit={onPwSubmit}>
-            <input type="password" placeholder="Current password" autoComplete="current-password"
+            <input type="password" placeholder="Current password" aria-label="Current password" autoComplete="current-password"
               style={{ width: '100%', marginBottom: 8 }} value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} />
-            <input type="password" placeholder="New password" autoComplete="new-password"
+            <input type="password" placeholder="New password" aria-label="New password" autoComplete="new-password"
               style={{ width: '100%', marginBottom: 8 }} value={pwNext} onChange={(e) => setPwNext(e.target.value)} />
-            <input type="password" placeholder="Repeat new password" autoComplete="new-password"
+            <input type="password" placeholder="Repeat new password" aria-label="Repeat new password" autoComplete="new-password"
               style={{ width: '100%', marginBottom: 10 }} value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} />
             <button className="primary" type="submit">Update password</button>
-            {pwMsg && <div className="small" style={{ marginTop: 8, color: pwMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pwMsg.text}</div>}
+            {pwMsg && <div className="small" role={pwMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: pwMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pwMsg.text}</div>}
           </form>
         </div>
 
@@ -105,21 +109,23 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
           <p className="muted small" style={{ marginTop: -6 }}>
             Sign in with your fingerprint, face or device PIN — no password to type or leak.
           </p>
-          <ul className="list">
-            {keys.length ? keys.map((k) => (
-              <li key={k.id}>
-                <span className="grow">
-                  <b>{k.label}</b>
-                  <div className="muted small">added {ago(k.createdAt)} · {k.lastUsed ? 'last used ' + ago(k.lastUsed) : 'never used'}</div>
-                </span>
-                <button className="x" title="Remove" onClick={() => removeKey(k.id)}>✕</button>
-              </li>
-            )) : <p className="muted">No passkeys yet.</p>}
-          </ul>
+          {keys.length ? (
+            <ul className="list">
+              {keys.map((k) => (
+                <li key={k.id}>
+                  <span className="grow">
+                    <b>{k.label}</b>
+                    <div className="muted small">added {ago(k.createdAt)} · {k.lastUsed ? 'last used ' + ago(k.lastUsed) : 'never used'}</div>
+                  </span>
+                  <button className="x" title="Remove" aria-label={`Remove passkey ${k.label}`} onClick={() => removeKey(k.id)}><X size={14} /></button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="muted">No passkeys yet.</p>}
           {webauthn
             ? <button className="primary" style={{ marginTop: 12 }} onClick={addKey}>+ Add a passkey</button>
             : <span className="muted">This browser does not support passkeys.</span>}
-          {pkMsg && <div className="small" style={{ marginTop: 8, color: pkMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pkMsg.text}</div>}
+          {pkMsg && <div className="small" role={pkMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: pkMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pkMsg.text}</div>}
         </div>
 
         <div className="card">
@@ -128,7 +134,7 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
             Used for "today"'s day boundary and for times you type into a task without one.
           </p>
           <select
-            value={tz} onChange={(e) => setTz(e.target.value)}
+            aria-label="Timezone" value={tz} onChange={(e) => setTz(e.target.value)}
             style={{ width: '100%', marginBottom: 8 }}
           >
             {!TIMEZONES.includes(tz) && <option value={tz}>{tz}</option>}
@@ -137,7 +143,7 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
           <button className="primary" onClick={saveTz} disabled={tz === (me?.timezone || BROWSER_TZ)}>
             Save timezone
           </button>
-          {tzMsg && <div className="small" style={{ marginTop: 8, color: tzMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{tzMsg.text}</div>}
+          {tzMsg && <div className="small" role={tzMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: tzMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{tzMsg.text}</div>}
         </div>
 
         <div className="card">

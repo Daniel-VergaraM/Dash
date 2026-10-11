@@ -143,7 +143,7 @@ export default function UserFormModal({
           <input type="checkbox" checked={disabled} onChange={(e) => setDisabled(e.target.checked)} />
           Suspended (blocks sign-in, ends sessions)
         </label>
-        <div className="err small">{err}</div>
+        <div className="err small" role="alert">{err}</div>
         <div className="row" style={{ marginTop: 14 }}>
           <button type="submit" className="primary">Save</button>
           <button type="button" onClick={onCancel}>Cancel</button>

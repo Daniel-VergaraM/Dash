@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import { jf } from '../lib/api';
 import type { LinearProjectStatus, LinearTeam, Project } from '../types';
 
@@ -13,13 +14,15 @@ export default function ProjectsModal({ projects, onClose, onChange }: {
   const [color, setColor] = useState('#6ea8fe');
   const [teamId, setTeamId] = useState('');
   const [err, setErr] = useState('');
+  const [loadErr, setLoadErr] = useState('');
   const formRef = useRef<HTMLFormElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
   useEffect(() => {
-    jf<LinearTeam[]>('/api/linear/teams').then((t) => { setTeams(t); if (t.length === 1) setTeamId(t[0].id); }).catch(() => {});
-    jf<LinearProjectStatus[]>('/api/linear/statuses').then(setStatuses).catch(() => {});
+    jf<LinearTeam[]>('/api/linear/teams').then((t) => { setTeams(t); if (t.length === 1) setTeamId(t[0].id); })
+      .catch((e) => setLoadErr((e as Error).message));
+    jf<LinearProjectStatus[]>('/api/linear/statuses').then(setStatuses).catch((e) => setLoadErr((e as Error).message));
   }, []);
 
   useEffect(() => {
@@ -46,13 +49,15 @@ export default function ProjectsModal({ projects, onClose, onChange }: {
     } catch (e) { setErr((e as Error).message); }
   }
   async function patch(id: string, body: Record<string, unknown>) {
+    setErr('');
     try { await jf('/api/projects/' + id, { method: 'PATCH', body: JSON.stringify(body) }); onChange(); }
-    catch (e) { alert((e as Error).message); }
+    catch (e) { setErr((e as Error).message); }
   }
   const remove = async (id: string, projName: string) => {
     if (!confirm(`Delete "${projName}"? It moves to Linear's trash — restorable there, not from Dash.`)) return;
+    setErr('');
     try { await jf('/api/projects/' + id, { method: 'DELETE' }); onChange(); }
-    catch (e) { alert((e as Error).message); }
+    catch (e) { setErr((e as Error).message); }
   };
 
   return (
@@ -60,34 +65,34 @@ export default function ProjectsModal({ projects, onClose, onChange }: {
       <form id="projectsForm" ref={formRef} role="dialog" aria-modal="true" aria-labelledby="projectsTitle" onSubmit={add}>
         <h3 id="projectsTitle">Projects</h3>
         <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-          <input className="grow" placeholder="New project name" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
-          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Color" />
-          <select value={teamId} onChange={(e) => setTeamId(e.target.value)} title="Team" required>
+          <input className="grow" placeholder="New project name" aria-label="New project name" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Color" aria-label="Color" />
+          <select value={teamId} onChange={(e) => setTeamId(e.target.value)} title="Team" aria-label="Team" required>
             <option value="">Team…</option>
             {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
-          <button type="submit" className="primary">Add</button>
+          <button type="submit" className="primary" disabled={!name.trim()}>Add</button>
         </div>
-        <div className="err small">{err}</div>
-        <ul className="list" style={{ marginTop: 12 }}>
-          {projects.length ? projects.map((p) => (
-            <li key={p.id} style={{ display: 'block' }}>
+        {(err || loadErr) && <div className="err small" role="alert" style={{ marginTop: 6 }}>{[err, loadErr].filter(Boolean).join(' ')}</div>}
+        {projects.length ? <ul className="list" style={{ marginTop: 12 }}>
+          {projects.map((p) => (
+            <li key={p.id}>
               <div className="row" style={{ gap: 6 }}>
                 <span className="swatch" style={{ background: p.status.color }} title={p.status.name} />
-                <input className="grow" defaultValue={p.name} onBlur={(e) => e.target.value !== p.name && patch(p.id, { name: e.target.value })} />
-                <select value={p.status.id} onChange={(e) => patch(p.id, { statusId: e.target.value })}>
+                <input className="grow" aria-label="Project name" defaultValue={p.name} onBlur={(e) => e.target.value !== p.name && patch(p.id, { name: e.target.value })} />
+                <select aria-label={`Status of ${p.name}`} value={p.status.id} onChange={(e) => patch(p.id, { statusId: e.target.value })}>
                   {statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
                 <input
-                  type="date" value={p.targetDate || ''} title="Due date"
+                  type="date" value={p.targetDate || ''} title="Due date" aria-label="Due date"
                   onChange={(e) => patch(p.id, { targetDate: e.target.value || null })}
                 />
                 <a href={p.url} target="_blank" rel="noreferrer" className="small">Open in Linear</a>
-                <button type="button" className="x" aria-label={`Delete ${p.name}`} onClick={() => remove(p.id, p.name)}>✕</button>
+                <button type="button" className="x" aria-label={`Delete ${p.name}`} onClick={() => remove(p.id, p.name)}><X size={14} /></button>
               </div>
               <div className="row" style={{ gap: 6, marginTop: 6 }}>
                 <input
-                  className="grow small" placeholder="Description (optional)" defaultValue={p.description}
+                  className="grow small" placeholder="Description (optional)" aria-label="Description" defaultValue={p.description}
                   onBlur={(e) => e.target.value !== p.description && patch(p.id, { description: e.target.value })}
                 />
                 {p.stats && (
@@ -97,8 +102,8 @@ export default function ProjectsModal({ projects, onClose, onChange }: {
                 )}
               </div>
             </li>
-          )) : <p className="muted">No projects yet.</p>}
-        </ul>
+          ))}
+        </ul> : <p className="muted" style={{ marginTop: 12 }}>No projects yet.</p>}
         <div className="row" style={{ marginTop: 14 }}>
           <button type="button" onClick={onClose}>Close</button>
         </div>
