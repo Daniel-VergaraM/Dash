@@ -1,14 +1,14 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Image as ImageIcon, Table as TableIcon } from 'lucide-react';
+import { Image as ImageIcon, ImageOff, Table as TableIcon } from 'lucide-react';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { useAuth } from '../../context/AuthContext';
 import { jf, encodePath } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
 import { insertTable, tabInTable } from '../../lib/mdTable';
-import { insertImage, isSafeImageUrl } from '../../lib/mdImage';
+import { insertImage, insertUploaded, isSafeImageUrl, IMG_TYPES, IMG_MAX } from '../../lib/mdImage';
 import type { NoteMeta, NoteDoc } from '../../types';
 
 const stem = (name: string) => name.replace(/\.md$/, '');
@@ -253,6 +253,52 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
     }
     setBody(r.text);
   };
+  // Pasted / dropped images: uploaded raw, then the markdown for the stored copy is inserted.
+  // The upload outlives the render that started it, so the latest body, note and applyEdit are
+  // read through refs, and the insert is skipped if the person has moved to another note.
+  const [uploading, setUploading] = useState(false);
+  const [upErr, setUpErr] = useState('');
+  const latest = useRef({ body, current, applyEdit });
+  latest.current = { body, current, applyEdit };
+  const [cleaned, setCleaned] = useState('');
+  useEffect(() => { setUpErr(''); setCleaned(''); }, [current]);
+
+  // Frees quota: removes images no note links to (and older than 10 min, enforced by the server).
+  async function cleanImages() {
+    if (!confirm('Delete every uploaded image that no note links to? Images pasted in the last 10 minutes are kept. This cannot be undone.')) return;
+    setCleaned(''); setUpErr('');
+    try {
+      const r = await jf<{ removed: number; freedBytes: number }>('/api/notes/assets/prune', { method: 'POST' });
+      const mb = r.freedBytes / 1048576;
+      setCleaned(r.removed ? `Removed ${r.removed} unused image${r.removed === 1 ? '' : 's'}, freed ${mb >= 0.1 ? mb.toFixed(1) + ' MB' : Math.ceil(r.freedBytes / 1024) + ' KB'}.` : 'No unused images to remove.');
+    } catch (e) { setUpErr((e as Error).message || 'Clean up failed'); }
+  }
+
+  async function uploadImage(file: File) {
+    const el = editorRef.current;
+    const at = { note: current, body, from: el?.selectionStart ?? body.length, to: el?.selectionEnd ?? body.length };
+    if (!IMG_TYPES.includes(file.type)) { setUpErr('Only png, jpeg, gif and webp images can be uploaded.'); return; }
+    if (file.size > IMG_MAX) { setUpErr('Image is larger than 5 MB.'); return; }
+    setUploading(true); setUpErr('');
+    try {
+      const res = await fetch('/api/notes/assets', { method: 'POST', headers: { 'content-type': file.type }, body: file });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || res.statusText);
+      const url = location.origin + j.url;
+      const now = latest.current;
+      if (now.current !== at.note) { setUpErr('Image uploaded, but the note changed before it could be inserted: ' + url); return; }
+      // Typing while it uploaded moved things: fall back to wherever the caret is now.
+      const same = now.body === at.body;
+      const e2 = editorRef.current;
+      const from = same ? at.from : e2?.selectionStart ?? now.body.length;
+      const to = same ? at.to : e2?.selectionEnd ?? now.body.length;
+      now.applyEdit(insertUploaded(now.body, from, to, url));
+      e2?.focus();
+    } catch (e) { setUpErr((e as Error).message || 'Upload failed'); }
+    finally { setUploading(false); }
+  }
+  const imageIn = (dt: DataTransfer | null) => Array.from(dt?.files ?? []).find((f) => f.type.startsWith('image/'));
+
   const { rowRef, onKeyDown, focusAt } = useListNav(shown.length, vimNav, {
     onRight: async (i) => {
       const n = shown[i];
@@ -305,6 +351,17 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
         </div>
         <textarea
           id="editor" ref={editorRef} value={body} aria-label="Note editor" readOnly={!current || !canWrite} onChange={(e) => setBody(e.target.value)}
+          onPaste={(e) => {
+            // Pasted text wins: copying from Word or a web page brings text AND an image.
+            if (!canWrite || !current || e.clipboardData.getData('text/plain')) return;
+            const f = imageIn(e.clipboardData);
+            if (f) { e.preventDefault(); uploadImage(f); }
+          }}
+          onDragOver={(e) => { if (canWrite && current && imageIn(e.dataTransfer)) e.preventDefault(); }}
+          onDrop={(e) => {
+            const f = canWrite && current ? imageIn(e.dataTransfer) : undefined;
+            if (f) { e.preventDefault(); uploadImage(f); }
+          }}
           onFocus={() => { tabFree.current = false; }} onBlur={() => { tabFree.current = false; }}
           onKeyDown={(e) => {
             if (e.key === 'Escape') tabFree.current = true;
@@ -348,6 +405,9 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
       </div>
       <div className="row small muted" style={{ marginTop: 8 }}>
         {saveErr ? <span className="err" role="alert">{saveErr}</span> : <span>{dirty ? current + ' · unsaved…' : status}</span>}
+        {uploading && <span role="status">Uploading image…</span>}
+        {cleaned && <span role="status">{cleaned}</span>}
+        {upErr && <span className="err" role="alert">{upErr}</span>}
         <button
           style={{ marginLeft: 'auto' }} disabled={!current || !canWrite}
           title={canWrite ? 'Insert a table. In a table, Tab / Shift+Tab move between cells; Esc then Tab leaves the editor.' : 'Requires notes:write'}
@@ -368,6 +428,10 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
             el.focus();
           }}
         ><ImageIcon size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Image</button>
+        <button
+          onClick={cleanImages} disabled={!canWrite}
+          title={canWrite ? 'Delete uploaded images that no note links to, to free image storage' : 'Requires notes:write'}
+        ><ImageOff size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Clean unused images</button>
         <button onClick={renameNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Rename / move</button>
         <button onClick={delNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Delete note</button>
       </div>

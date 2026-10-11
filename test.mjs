@@ -7,6 +7,7 @@ import {
   prioToLinear, prioFromLinear, inboxScore, inboxOrder, issuePatch, linearLink,
   notePath, parseNote, resolveLink, backlinksOf, rewriteLinks, filterNotes,
   localNow, dueDate, cleanNotify, dueReminders, digestDue, digestItem, parseQuick,
+  sniffImage, badDims, stripJpegMeta, ASSET_NAME,
 } from './lib.js';
 import {
   initNotify, getSettings, setSettings, feedOf, unreadOf, markRead, push,
@@ -67,6 +68,77 @@ assert.equal(cleanTimezone('America/Mexico_City'), 'America/Mexico_City');
 assert.equal(cleanTimezone('Not/AZone'), null);
 assert.equal(cleanTimezone(null), null);
 assert.equal(cleanTimezone(42), null);
+
+/* ---------- note images ---------- */
+
+{
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const u16 = (n) => Buffer.from([n >> 8, n & 255]);
+  // Not decodable, but a structurally valid header chain: SOI, APP0, [APP1 Exif+GPS], SOF0, SOS, EOI.
+  const jpeg = (w, h, exif) => Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16]), Buffer.from('JFIF\0\x01\x01\0\0\x01\0\x01\0\0', 'latin1'),
+    exif ? Buffer.concat([Buffer.from([0xff, 0xe1]), u16(24), Buffer.from('Exif\0\0GPS:12.3,4.5....', 'latin1')]) : Buffer.alloc(0),
+    Buffer.from([0xff, 0xc0, 0, 11, 8]), u16(h), u16(w), Buffer.from([1, 1, 0x11, 0]),
+    Buffer.from([0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0]), Buffer.from([1, 2, 3]), Buffer.from([0xff, 0xd9]),
+  ]);
+  const gif = (w, h) => Buffer.concat([Buffer.from('GIF89a'), Buffer.from([w & 255, w >> 8, h & 255, h >> 8, 0, 0, 0, 0x3b])]);
+  const webp = Buffer.from('524946461200000057454250' + '5650384c05000000' + '2f00000000' + '00', 'hex'); // VP8L 1x1 + pad
+  const dim = (b) => { const s = sniffImage(b); return s && [s.type, s.width, s.height]; };
+
+  assert.deepEqual(dim(PNG), ['image/png', 1, 1]);
+  assert.deepEqual(dim(jpeg(30, 20)), ['image/jpeg', 30, 20]);
+  assert.deepEqual(dim(gif(7, 9)), ['image/gif', 7, 9]);
+  assert.deepEqual(dim(webp), ['image/webp', 1, 1]);
+  assert.equal(sniffImage(PNG).ext, 'png');
+  assert.equal(sniffImage(jpeg(1, 1)).ext, 'jpg');
+
+  // Things that are not one of the four formats, or only dress up as one.
+  for (const [what, b] of [
+    ['svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script>alert(1)</script></svg>')],
+    ['html', Buffer.from('<!doctype html><script>alert(1)</script>')],
+    ['script as png', Buffer.from('<script>alert(document.cookie)</script>')],
+    ['text', Buffer.from('hello world, definitely not an image')],
+    ['bmp', Buffer.from('BM' + 'x'.repeat(60))],
+    ['empty', Buffer.alloc(0)],
+    ['not a buffer', 'GIF89a'],
+  ]) assert.equal(sniffImage(b), null, what);
+
+  // Right magic, wrong everything else: recognised but flagged unusable (no dimensions).
+  assert.ok(badDims(sniffImage(PNG.subarray(0, 20))), 'truncated png');
+  assert.ok(badDims(sniffImage(Buffer.concat([PNG, Buffer.from('<script>')]))), 'png with appended payload');
+  assert.ok(badDims(sniffImage(Buffer.concat([gif(1, 1), Buffer.from('<script>alert(1)</script>')]))), 'gif+html polyglot');
+  assert.ok(badDims(sniffImage(Buffer.concat([webp, Buffer.from('<script>alert(1)</script>')]))), 'webp+html');
+  assert.ok(badDims(sniffImage(Buffer.concat([Buffer.from('GIF89a'), Buffer.from('<script>alert(1)</script>')]))), 'GIF header over html');
+  assert.ok(badDims(sniffImage(jpeg(10, 10).subarray(0, 30))), 'truncated jpeg');
+  assert.ok(badDims(sniffImage(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0]))), 'jpeg segment past the end');
+  for (let n = 12; n < PNG.length; n++) sniffImage(PNG.subarray(0, n)); // never throws on any prefix
+  for (let n = 12; n < 60; n++) { sniffImage(jpeg(5, 5, true).subarray(0, n)); sniffImage(webp.subarray(0, n)); }
+
+  // Dimension ceilings: 0 px, > 8000 per side, > 40 MP.
+  assert.equal(badDims({ width: 8000, height: 5000 }), '');
+  assert.ok(badDims({ width: 8001, height: 1 }));
+  assert.ok(badDims({ width: 7000, height: 7000 }), '49 MP');
+  assert.ok(badDims({ width: 0, height: 10 }));
+  assert.ok(badDims(sniffImage(jpeg(60000, 60000))));
+
+  // EXIF/XMP is stripped and what remains still sniffs the same.
+  const withExif = jpeg(30, 20, true);
+  const clean = stripJpegMeta(withExif);
+  assert.ok(withExif.includes('GPS:12.3') && !clean.includes('GPS:12.3') && !clean.includes('Exif'));
+  assert.deepEqual(dim(clean), ['image/jpeg', 30, 20]);
+  assert.equal(clean.length, withExif.length - 26);
+  assert.equal(stripJpegMeta(jpeg(1, 1)).equals(jpeg(1, 1)), true);
+  assert.equal(stripJpegMeta(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0, 4])), null, 'no SOS: refused, not stored raw');
+
+  // The name is the only thing the server will look up on disk.
+  const id = 'a'.repeat(32);
+  for (const ok of [`${id}.png`, `${id}.jpg`, `${id}.jpeg`, `${id}.gif`, `${id}.webp`]) assert.ok(ASSET_NAME.test(ok), ok);
+  for (const bad of ['../x.png', `../${id}.png`, '..%2f..%2fx.png', 'a/b.png', `${id.toUpperCase()}.png`, `${id}.PNG`,
+    `${id}.png.html`, `${id}.html`, `${id}.svg`, `${id}.png\0`, `${id}.png\n`, `${'a'.repeat(31)}.png`, `${'a'.repeat(33)}.png`,
+    `${'g'.repeat(32)}.png`, '%2e%2e', '..', '.', `${id}`, `.${id}.png`, `${id}.png/`]) {
+    assert.equal(ASSET_NAME.test(bad), false, JSON.stringify(bad));
+  }
+}
 
 /* ---------- quick capture ---------- */
 
@@ -734,6 +806,152 @@ assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.'
     assert.deepEqual((await fs.readdir(path.join(dir, 'notes'))).sort(), [uid]);
     assert.equal((await call('DELETE', '/api/notes/z/b2.md')).status, 200);
     assert.equal((await (await call('GET', '/api/notes')).json()).length, 1);
+
+    // Pasted images: private per person, typed by content, bounded, and nothing leaves assets/<uid>.
+    {
+      const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+      const up = (ck, body, type = 'image/png', extra = {}) => fetch(`${base}/api/notes/assets`, {
+        method: 'POST', headers: { ...(ck ? { cookie: ck } : {}), 'content-type': type, ...extra }, body,
+      });
+      const login2 = async (name, password) => {
+        const r = await fetch(`${base}/api/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, password }),
+        });
+        assert.equal(r.status, 200);
+        return r.headers.get('set-cookie').split(';')[0];
+      };
+      assert.equal((await call('POST', '/api/access/users', { name: 'Writer', role: 'member', password: 'writer-pass-123' })).status, 200);
+      assert.equal((await call('POST', '/api/access/users', { name: 'Reader', role: 'guest', password: 'reader-pass-123' })).status, 200);
+      const writer = await login2('Writer', 'writer-pass-123');
+      const reader = await login2('Reader', 'reader-pass-123');
+
+      assert.equal((await up(null, PNG)).status, 401);
+      assert.equal((await fetch(`${base}/notes/assets/${'a'.repeat(32)}.png`)).status, 401);
+      assert.equal((await up(reader, PNG)).status, 403, 'no notes:write');
+
+      const ok = await up(cookie, PNG);
+      assert.equal(ok.status, 201);
+      const a = await ok.json();
+      assert.match(a.name, /^[a-f0-9]{32}\.png$/);
+      assert.deepEqual([a.id + '.png', a.url, a.bytes, a.type], [a.name, `/notes/assets/${a.name}`, PNG.length, 'image/png']);
+      assert.equal(JSON.stringify(a).includes(dir), false, 'no disk paths in the response');
+
+      const got = await fetch(base + a.url, { headers: { cookie } });
+      assert.equal(got.status, 200);
+      assert.ok(Buffer.from(await got.arrayBuffer()).equals(PNG));
+      const h = (k) => got.headers.get(k);
+      assert.deepEqual([h('content-type'), h('x-content-type-options'), h('content-disposition'), h('cross-origin-resource-policy'), h('referrer-policy')],
+        ['image/png', 'nosniff', 'inline', 'same-origin', 'no-referrer']);
+      assert.equal(h('content-security-policy'), "default-src 'none'; img-src 'self'; style-src 'none'; sandbox");
+      assert.equal(h('cache-control'), 'private, max-age=31536000, immutable');
+      assert.equal((await fetch(base + a.url, { method: 'HEAD', headers: { cookie } })).status, 200);
+      assert.equal((await fetch(base + a.url, { headers: { cookie, 'if-none-match': h('etag') }, cache: 'force-cache' })).status, 304); // fetch adds no-cache to conditional requests unless told not to
+
+      // Another signed-in person gets a plain 404, exactly as for an id that does not exist.
+      assert.equal((await fetch(base + a.url, { headers: { cookie: writer } })).status, 404);
+      assert.equal((await fetch(`${base}/notes/assets/${'0'.repeat(32)}.png`, { headers: { cookie } })).status, 404);
+      for (const bad of ['..%2F..%2Fauth.json', '%2e%2e%2fauth.json', 'a%2Fb.png', a.name.toUpperCase(), a.name + '.html', a.name + '%00', a.id.slice(1) + '.png', a.id + '.svg']) {
+        assert.equal((await fetch(`${base}/notes/assets/${bad}`, { headers: { cookie } })).status, 404, bad);
+      }
+
+      // Content decides, not the declared type or name.
+      for (const [what, body, type] of [
+        ['script as image/png', '<script>alert(1)</script>', 'image/png'],
+        ['svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>', 'image/svg+xml'],
+        ['svg as png', '<svg xmlns="http://www.w3.org/2000/svg"/>', 'image/png'],
+        ['real png, wrong type', PNG, 'text/html'],
+        ['real png, json type', PNG, 'application/json'],
+      ]) assert.equal((await up(cookie, body, type)).status, 415, what);
+      assert.equal((await up(cookie, Buffer.concat([Buffer.from('GIF89a'), Buffer.from('<script>1</script>')]), 'image/gif')).status, 400, 'gif header over html');
+      assert.equal((await up(cookie, PNG.subarray(0, 20))).status, 400, 'truncated');
+      const wide = Buffer.from(PNG); wide.writeUInt32BE(9000, 16);
+      assert.equal((await up(cookie, wide)).status, 400, 'too wide');
+      assert.ok([400, 415].includes((await up(cookie, Buffer.alloc(0))).status), 'empty');
+      assert.equal((await up(cookie, PNG, 'image/*')).status, 415, 'literal image/* is a bad type, not an empty body');
+      assert.equal((await up(cookie, Buffer.alloc(5 * 1024 * 1024 + 1, 1))).status, 413);
+      assert.equal((await up(cookie, PNG, 'image/png', { 'sec-fetch-site': 'cross-site' })).status, 403);
+      assert.equal((await up(cookie, PNG, 'image/png', { origin: 'https://evil.example' })).status, 403);
+      assert.equal((await up(cookie, PNG, 'image/png', { origin: base })).status, 201);
+
+      // JPEG metadata (EXIF/GPS) never reaches the disk.
+      const jpg = Buffer.concat([
+        Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0, 18]), Buffer.from('Exif\0\0GPS-SECRET', 'latin1'),
+        Buffer.from([0xff, 0xc0, 0, 11, 8, 0, 2, 0, 2, 1, 1, 0x11, 0, 0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 9, 0xff, 0xd9]),
+      ]);
+      const j = await (await up(cookie, jpg, 'image/jpeg')).json();
+      assert.match(j.name, /\.jpg$/);
+      const stored = await fs.readFile(path.join(dir, 'assets', uid, j.name));
+      assert.ok(jpg.includes('GPS-SECRET') && !stored.includes('GPS-SECRET'));
+      const back = await fetch(base + j.url, { headers: { cookie } });
+      assert.ok(Buffer.from(await back.arrayBuffer()).equals(stored));
+      assert.equal(back.headers.get('content-type'), 'image/jpeg');
+
+      // Everything landed in assets/<uid>, only valid names, no temp leftovers, no note index noise.
+      assert.deepEqual(await fs.readdir(path.join(dir, 'assets')), [uid]);
+      const mine = await fs.readdir(path.join(dir, 'assets', uid));
+      assert.equal(mine.length, 3);
+      assert.ok(mine.every((n) => /^[a-f0-9]{32}\.(png|jpg)$/.test(n)));
+      assert.equal((await (await call('GET', '/api/notes')).json()).length, 1, 'images are not notes');
+
+      // Quota: 200 files per person.
+      for (let i = mine.length; i < 200; i++) await fs.writeFile(path.join(dir, 'assets', uid, `${String(i).padStart(32, '0')}.png`), PNG);
+      const full = await up(cookie, PNG);
+      assert.equal(full.status, 507);
+      assert.match((await full.json()).error, /Clean unused images/);
+      assert.equal((await fetch(base + a.url, { headers: { cookie } })).status, 200, 'existing files still served');
+      assert.equal((await fetch(base + a.url + '/', { headers: { cookie } })).status, 404, 'trailing slash');
+
+      // Freeing quota: list, delete, prune. One note links a.png; all but one filler are an hour old.
+      const adir = path.join(dir, 'assets', uid);
+      const hourAgo = new Date(Date.now() - 3600_000);
+      const fresh = `${String(199).padStart(32, '0')}.png`;
+      for (const n of await fs.readdir(adir)) if (n !== fresh) await fs.utimes(path.join(adir, n), hourAgo, hourAgo);
+      assert.equal((await call('PUT', '/api/notes/img.md', { body: `![x](${base}${a.url})` })).status, 200);
+      const lst = await (await fetch(`${base}/api/notes/assets`, { headers: { cookie } })).json();
+      assert.deepEqual([lst.count, lst.limits, lst.totalBytes > 0], [200, { files: 200, bytes: 200 * 1024 * 1024 }, true]);
+      assert.deepEqual(lst.files.find((f) => f.name === a.name).usedBy, ['img.md']);
+      assert.ok(lst.files.filter((f) => f.name !== a.name).every((f) => f.usedBy.length === 0 && f.bytes > 0 && !Number.isNaN(Date.parse(f.modified))));
+      assert.equal(JSON.stringify(lst).includes(dir), false);
+      const mut = (ck, method, p) => fetch(`${base}${p}`, { method, headers: { cookie: ck } });
+      assert.equal((await mut(reader, 'GET', '/api/notes/assets')).status, 403);
+      assert.equal((await mut(reader, 'DELETE', `/api/notes/assets/${a.name}`)).status, 403, 'no notes:write');
+      assert.equal((await mut(reader, 'POST', '/api/notes/assets/prune')).status, 403);
+      assert.equal((await mut(writer, 'DELETE', `/api/notes/assets/${a.name}`)).status, 404, 'not theirs');
+      assert.equal((await mut(cookie, 'DELETE', '/api/notes/assets/..%2F..%2Fauth.json')).status, 404);
+      assert.equal((await mut(cookie, 'DELETE', `/api/notes/assets/${'1'.repeat(32)}.png`)).status, 404);
+      const pr = await (await mut(cookie, 'POST', '/api/notes/assets/prune')).json();
+      assert.equal(pr.removed, 198, 'all but the referenced and the fresh one');
+      assert.ok(pr.freedBytes > 0);
+      assert.deepEqual((await fs.readdir(adir)).sort(), [a.name, fresh].sort());
+      assert.equal((await fetch(base + a.url, { headers: { cookie } })).status, 200);
+      assert.equal((await up(cookie, PNG)).status, 201, 'quota is usable again');
+      assert.deepEqual(await (await mut(cookie, 'POST', '/api/notes/assets/prune')).json(), { removed: 0, freedBytes: 0 }, 'new and linked images stay');
+
+      // Hostile JPEG: ~1.2M empty APP1 segments used to stall the event loop for 1.5 s and balloon memory.
+      const hostile = Buffer.alloc(2 + 4 * 1_200_000);
+      hostile.set([0xff, 0xd8]);
+      for (let i = 0; i < 1_200_000; i++) hostile.set([0xff, 0xe1, 0, 2], 2 + i * 4);
+      const t0 = Date.now();
+      assert.equal((await up(cookie, hostile, 'image/jpeg')).status, 400, 'hostile jpeg refused');
+      assert.ok(Date.now() - t0 < 1000, 'and cheaply');
+      // A normal photo with three APP1 segments still goes through, all stripped.
+      const app1 = (t) => Buffer.concat([Buffer.from([0xff, 0xe1, 0, t.length + 2]), Buffer.from(t, 'latin1')]);
+      const three = Buffer.concat([Buffer.from([0xff, 0xd8]), app1('EXIF-ONE'), app1('XMP-TWO'), app1('ICC-THREE'), jpg.subarray(jpg.indexOf(Buffer.from([0xff, 0xc0])))]);
+      const r3 = await up(cookie, three, 'image/jpeg');
+      assert.equal(r3.status, 201);
+      const kept = await fs.readFile(path.join(adir, (await r3.json()).name));
+      assert.ok(three.includes('EXIF-ONE') && !kept.includes('EXIF-ONE') && !kept.includes('XMP-TWO') && !kept.includes('ICC-THREE'));
+
+      // DELETE removes one image and says which notes still link to it.
+      const del = await (await mut(cookie, 'DELETE', `/api/notes/assets/${a.name}`)).json();
+      assert.deepEqual(del, { ok: true, wasUsedBy: ['img.md'] });
+      assert.equal((await fetch(base + a.url, { headers: { cookie } })).status, 404);
+      assert.equal((await mut(cookie, 'DELETE', `/api/notes/assets/${a.name}`)).status, 404);
+
+      // Rate limit: 30 attempts a minute per person, failed ones included.
+      for (let i = 0; i < 30; i++) assert.equal((await up(writer, 'x', 'text/plain')).status, 415, `attempt ${i}`);
+      assert.equal((await up(writer, PNG)).status, 429);
+    }
 
     const nf = await (await call('GET', '/api/notifications')).json();
     assert.deepEqual([nf.unread, nf.items, nf.settings.enabled], [0, [], false]);

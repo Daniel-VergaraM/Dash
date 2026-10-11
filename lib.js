@@ -535,3 +535,112 @@ export function parseQuick(text, { now = new Date(), tz, projects = [], projects
   if (!out) warnings.push('Title is empty');
   return { title: out, due, hasTime: due !== null && mins !== null, priority, project, duration, warnings };
 }
+
+/* ---------- note images (pasted uploads) ---------- */
+
+export const IMG_MAX_BYTES = 5 * 1024 * 1024;
+export const IMG_MAX_SIDE = 8000;   // px per side
+export const IMG_MAX_PIXELS = 40e6; // decompression-bomb ceiling: 40 MP is ~160 MB of RGBA in a browser
+export const IMG_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+// The only shape the server will ever look up on disk: 128 random bits and an extension it chose itself.
+export const ASSET_NAME = /^[a-f0-9]{32}\.(png|jpe?g|gif|webp)$/;
+
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_END = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+
+// JPEG segment walk shared by sniff and strip. Calls fn(marker, pos, len) for each segment up
+// to and including SOS and returns SOS's position (-1 if the stream ends or is malformed
+// first). `pos` is the 0xFF byte; `len` is the 2-byte length field (>= 2). Every step moves
+// forward by >= 4 bytes and is bounds-checked, so hostile input cannot loop or throw.
+// ponytail: 2000 segments is far beyond any real photo (a handful) and bounds the work a 5 MB
+// file of empty segments can force; raise it only if real files start hitting it.
+const JPEG_MAX_SEGMENTS = 2000;
+function jpegWalk(b, fn) {
+  let pos = 2, n = 0;
+  while (pos + 4 <= b.length) {
+    if (++n > JPEG_MAX_SEGMENTS) return -1;
+    if (b[pos] !== 0xff) return -1;
+    const m = b[pos + 1];
+    if (m === 0xff) { pos++; continue; } // fill byte
+    if (m === 0xd9 || (m >= 0xd0 && m <= 0xd8) || m === 0x01 || m === 0x00) return -1; // no length: not valid before SOS
+    const len = b.readUInt16BE(pos + 2);
+    if (len < 2 || pos + 2 + len > b.length) return -1;
+    fn(m, pos, len);
+    if (m === 0xda) return pos;
+    pos += 2 + len;
+  }
+  return -1;
+}
+
+// Decides what a byte string IS by its content (never by name or declared type). Returns
+// { type, ext, width, height } for png/jpeg/gif/webp, or null for anything else. width/height
+// are 0 when the header is truncated or malformed; callers must also check badDims().
+export function sniffImage(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  const out = (type, ext, width = 0, height = 0) => ({ type, ext, width, height });
+
+  if (buf.subarray(0, 8).equals(PNG_SIG)) {
+    // IHDR must be the first chunk, and a real PNG ends with IEND: appended data is refused.
+    const ok = buf.length >= 33 && buf.readUInt32BE(8) === 13 && buf.toString('latin1', 12, 16) === 'IHDR'
+      && buf.subarray(buf.length - 12).equals(PNG_END);
+    return ok ? out('image/png', 'png', buf.readUInt32BE(16), buf.readUInt32BE(20)) : out('image/png', 'png');
+  }
+
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    let w = 0, h = 0;
+    jpegWalk(buf, (m, pos, len) => {
+      // SOF0-15 except DHT(C4), JPG(C8), DAC(CC); frame header is 8 bytes after the length.
+      if (!w && m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc && len >= 8) {
+        h = buf.readUInt16BE(pos + 5); w = buf.readUInt16BE(pos + 7);
+      }
+    });
+    return out('image/jpeg', 'jpg', w, h);
+  }
+
+  const head = buf.toString('latin1', 0, 6);
+  if (head === 'GIF87a' || head === 'GIF89a') {
+    // 0x3B trailer: the stream has to terminate where it says it does.
+    return buf.length >= 14 && buf[buf.length - 1] === 0x3b
+      ? out('image/gif', 'gif', buf.readUInt16LE(6), buf.readUInt16LE(8)) : out('image/gif', 'gif');
+  }
+
+  if (buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') {
+    // RIFF size must account for the whole file (one pad byte allowed): no appended payload.
+    const end = buf.readUInt32LE(4) + 8;
+    if (end > buf.length || buf.length - end > 1 || buf.length < 25) return out('image/webp', 'webp');
+    const kind = buf.toString('latin1', 12, 16);
+    if (kind === 'VP8 ' && buf.length >= 30 && buf[23] === 0x9d && buf[24] === 0x01 && buf[25] === 0x2a) {
+      return out('image/webp', 'webp', buf.readUInt16LE(26) & 0x3fff, buf.readUInt16LE(28) & 0x3fff);
+    }
+    if (kind === 'VP8L' && buf[20] === 0x2f) {
+      const b = buf.readUInt32LE(21);
+      return out('image/webp', 'webp', (b & 0x3fff) + 1, ((b >>> 14) & 0x3fff) + 1);
+    }
+    if (kind === 'VP8X' && buf.length >= 30) {
+      return out('image/webp', 'webp', buf.readUIntLE(24, 3) + 1, buf.readUIntLE(27, 3) + 1);
+    }
+    return out('image/webp', 'webp');
+  }
+  return null;
+}
+
+// Truthy reason when the declared size is unusable or a decompression bomb.
+export const badDims = ({ width, height }) =>
+  !width || !height ? 'image has no readable dimensions'
+    : width > IMG_MAX_SIDE || height > IMG_MAX_SIDE || width * height > IMG_MAX_PIXELS
+      ? `image is too large (max ${IMG_MAX_SIDE}px per side, ${IMG_MAX_PIXELS / 1e6} MP)` : '';
+
+// EXIF/XMP (APP1) and Photoshop/IPTC (APP13) can carry GPS position, device and author. Drops
+// them from a JPEG and returns the new buffer, or null if the segments cannot be walked, in
+// which case the caller must refuse rather than store the original untouched.
+// ponytail: orientation lives in EXIF too, so a phone photo taken sideways loses its rotation.
+export function stripJpegMeta(buf) {
+  const cuts = [];
+  const sos = jpegWalk(buf, (m, pos, len) => { if (m === 0xe1 || m === 0xed) cuts.push([pos, pos + 2 + len]); });
+  if (sos < 0) return null;
+  const parts = [];
+  let at = 0;
+  for (const [a, b] of cuts) { parts.push(buf.subarray(at, a)); at = b; }
+  parts.push(buf.subarray(at));
+  return Buffer.concat(parts);
+}

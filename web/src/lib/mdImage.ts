@@ -15,6 +15,19 @@ export function isSafeImageUrl(url: string): boolean {
   return !/^[a-z][a-z0-9+.-]*:/i.test(u); // no other scheme => relative or //host
 }
 
+// Raster types the server accepts for uploads, and its size ceiling (kept in step with lib.js).
+export const IMG_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+export const IMG_MAX = 5 * 1024 * 1024;
+
+// Inserts the markdown for an image that was just uploaded, replacing the selection; selected
+// text becomes the alt. The caret ends after it.
+export function insertUploaded(text: string, from: number, to: number, url: string): Edit {
+  const alt = text.slice(from, to).replace(/\s+/g, ' ').trim().replace(/[[\]\\]/g, '\\$&') || 'image';
+  const md = `![${alt}](${url})`;
+  const end = from + md.length;
+  return { text: text.slice(0, from) + md + text.slice(to), sel: [end, end] };
+}
+
 // Inserts `![alt](url)` at the caret. Selected text becomes the alt and `url` is left
 // selected for pasting; a selected http(s) URL becomes the url with an empty alt (caret in it).
 export function insertImage(text: string, from: number, to: number): Edit {

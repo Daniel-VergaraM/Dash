@@ -11,6 +11,7 @@ import {
   macFromArp, taskWindow, dueDate, startOfDay, searchSources, driveTerm, matches,
   prioFromLinear, linearLink, issuePatch, ymd, inboxScore, inboxOrder,
   localNow, hmToMin, cleanNotify, dueReminders, digestDue, digestItem, parseQuick,
+  IMG_MAX_BYTES, IMG_MIME, ASSET_NAME, sniffImage, badDims, stripJpegMeta,
 } from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
@@ -33,6 +34,8 @@ const DIR = import.meta.dirname;
 const DATA = path.resolve(DIR, process.env.DATA_DIR || 'data');
 const NOTES = path.join(DATA, 'notes');
 const notesDir = (userId) => path.join(NOTES, userId);
+// Pasted images live beside, not inside, the notes: the note index and rename never see them.
+const assetDir = (userId) => path.join(DATA, 'assets', userId);
 const TOKEN_FILE = path.join(DATA, 'tokens.json');
 const PORT = Number(process.env.PORT ?? 3000); // PORT=0 -> ephemeral
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -68,7 +71,12 @@ const fail = (status, msg) => Object.assign(new Error(msg), { status });
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).then(
     (d) => (res.headersSent ? undefined : res.json(d ?? {})),
-    (e) => res.status(e.status || 500).json({ error: e.message }),
+    (e) => {
+      if (e.status) return res.status(e.status).json({ error: e.message });
+      // Unexpected errors carry disk paths and OS detail: log it, tell the client nothing.
+      console.error('[api]', req.method, req.path, e);
+      res.status(500).json({ error: 'server error' });
+    },
   );
 
 // Short-lived per-key cache for upstream reads the palette and inbox repeat.
@@ -282,7 +290,9 @@ const me = (user, session) => ({
 
 const app = express();
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY);
-app.use(express.json({ limit: '4mb' }));
+const jsonBody = express.json({ limit: '4mb' });
+// Image uploads are raw bytes with their own parser and limit; never try them as JSON.
+app.use((req, res, next) => (req.path === '/api/notes/assets' ? next() : jsonBody(req, res, next)));
 
 app.get('/api/me', wrap(async (req, res) => {
   const found = sessionUser(sidOf(req));
@@ -1191,6 +1201,69 @@ app.post('/api/notes/rename', can('notes:write'), wrap(async (req) => {
   return { name: to, rewritten };
 }));
 
+// Image management. Registered before the wildcards below so "assets" is never read as a note
+// path. Everything stays inside assets/<uid>, matches ASSET_NAME exactly and skips symlinks.
+const ASSET_REF = /\/notes\/assets\/([a-f0-9]{32}\.(?:png|jpe?g|gif|webp))/g;
+const PRUNE_MIN_AGE_MS = 10 * 60_000; // a just-pasted image may not be autosaved into its note yet
+
+async function assetFiles(uid) {
+  const dir = assetDir(uid);
+  const out = [];
+  for (const name of await fs.readdir(dir).catch(() => [])) {
+    if (!ASSET_NAME.test(name)) continue;
+    const st = await fs.lstat(path.join(dir, name)).catch(() => null);
+    if (st?.isFile()) out.push({ name, bytes: st.size, mtimeMs: st.mtimeMs });
+  }
+  return out;
+}
+
+// name -> [note, ...] for every image a note body links to.
+async function assetUse(uid) {
+  const used = new Map();
+  for (const e of await noteIndex(uid)) {
+    for (const m of e.body.matchAll(ASSET_REF)) {
+      const l = used.get(m[1]) || used.set(m[1], []).get(m[1]);
+      if (!l.includes(e.rel)) l.push(e.rel);
+    }
+  }
+  return used;
+}
+
+app.get('/api/notes/assets', can('notes:write'), wrap(async (req) => {
+  const [files, used] = await Promise.all([assetFiles(req.user.id), assetUse(req.user.id)]);
+  return {
+    files: files.map((f) => ({ name: f.name, bytes: f.bytes, modified: new Date(f.mtimeMs).toISOString(), usedBy: used.get(f.name) || [] })),
+    totalBytes: files.reduce((n, f) => n + f.bytes, 0),
+    count: files.length,
+    limits: { files: ASSET_MAX_FILES, bytes: ASSET_MAX_BYTES },
+  };
+}));
+
+app.post('/api/notes/assets/prune', can('notes:write'), sameOrigin, wrap((req) =>
+  oneAtATime(req.user.id, async () => {
+    const uid = req.user.id;
+    const used = await assetUse(uid);
+    const cutoff = Date.now() - PRUNE_MIN_AGE_MS;
+    let removed = 0, freedBytes = 0;
+    for (const f of await assetFiles(uid)) {
+      if (used.has(f.name) || f.mtimeMs > cutoff) continue;
+      if (await fs.rm(path.join(assetDir(uid), f.name), { force: true }).then(() => true, () => false)) { removed++; freedBytes += f.bytes; }
+    }
+    return { removed, freedBytes };
+  })));
+
+app.delete('/api/notes/assets/:name', can('notes:write'), sameOrigin, wrap((req) =>
+  oneAtATime(req.user.id, async () => {
+    const name = req.params.name;
+    if (!ASSET_NAME.test(name)) throw fail(404, 'not found');
+    const abs = path.join(assetDir(req.user.id), name);
+    const st = await fs.lstat(abs).catch(() => null);
+    if (!st?.isFile()) throw fail(404, 'not found');
+    const wasUsedBy = (await assetUse(req.user.id)).get(name) || [];
+    await fs.rm(abs, { force: true });
+    return { ok: true, wasUsedBy };
+  })));
+
 app.get('/api/notes/*', can('notes:read'), wrap(async (req) => {
   const name = notePath(req.params[0]);
   const body = await fs.readFile(noteFile(req.user.id, name), 'utf8').catch(() => '');
@@ -1216,6 +1289,127 @@ app.delete('/api/notes/*', can('notes:write'), wrap(async (req) => {
   await pruneFolders(req.user.id, name);
   return { ok: true };
 }));
+
+/* ---------- Note images (pasted uploads, private per person) ---------- */
+
+// Per person: enough for a long-lived notebook, small enough that one account cannot fill the disk.
+const ASSET_MAX_FILES = 200;
+const ASSET_MAX_BYTES = 200 * 1024 * 1024;
+const UPLOADS_PER_MIN = 30;
+
+// Belt and braces on top of SameSite=Lax: a browser says where a request came from, and a
+// mutating one from another site is refused. Clients that send neither header (curl, tests) pass.
+function sameOrigin(req, res, next) {
+  const site = req.headers['sec-fetch-site'];
+  const origin = req.headers.origin;
+  const hostOk = (() => { try { return !origin || origin === RP_ORIGIN || new URL(origin).host === req.headers.host; } catch { return false; } })();
+  if ((site && site !== 'same-origin' && site !== 'none') || !hostOk) {
+    return res.status(403).json({ error: 'cross-site upload refused' });
+  }
+  next();
+}
+
+// ponytail: in-memory sliding window, reset on restart; keys are per person so it is bounded
+// by headcount. Counts failed attempts too, so probing with junk is throttled as well.
+const uploadLog = new Map();
+function uploadGate(req, res, next) {
+  const now = Date.now();
+  const recent = (uploadLog.get(req.user.id) || []).filter((t) => now - t < 60_000);
+  if (recent.length >= UPLOADS_PER_MIN) {
+    uploadLog.set(req.user.id, recent);
+    return res.status(429).json({ error: 'too many uploads — wait a minute' });
+  }
+  recent.push(now);
+  uploadLog.set(req.user.id, recent);
+  next();
+}
+
+// Quota check and write must not interleave for one person, or two parallel pastes both pass it.
+const uploadChain = new Map();
+const oneAtATime = (uid, fn) => {
+  const run = (uploadChain.get(uid) || Promise.resolve()).then(fn);
+  uploadChain.set(uid, run.catch(() => {}));
+  return run;
+};
+
+app.post('/api/notes/assets', can('notes:write'), sameOrigin, uploadGate,
+  express.raw({ type: 'image/*', limit: IMG_MAX_BYTES }),
+  wrap(async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) {
+      // Only a real image/<subtype> with no body is "empty"; "image/*" or a missing type is the wrong header.
+      throw /^image\/[a-z0-9][a-z0-9.+-]*$/i.test((req.headers['content-type'] || '').split(';')[0].trim())
+        ? fail(400, 'empty upload') : fail(415, 'send the raw image with an image/png, image/jpeg, image/gif or image/webp Content-Type');
+    }
+    // Declared type is a hint; the bytes decide. Anything that is not exactly one of four
+    // raster formats (SVG, HTML, BMP, AVIF, polyglots with a bad trailer) is refused.
+    const info = sniffImage(req.body);
+    if (!info) throw fail(415, 'only png, jpeg, gif and webp images are accepted');
+    const why = badDims(info);
+    if (why) throw fail(400, why);
+    let bytes = req.body;
+    if (info.ext === 'jpg') {
+      bytes = stripJpegMeta(bytes);
+      if (!bytes) throw fail(400, 'corrupt jpeg');
+    }
+
+    const dir = assetDir(req.user.id);
+    return oneAtATime(req.user.id, async () => {
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+      let files = 0, total = 0;
+      for (const n of await fs.readdir(dir).catch(() => [])) {
+        if (!ASSET_NAME.test(n)) continue;
+        const st = await fs.stat(path.join(dir, n)).catch(() => null);
+        if (st) { files++; total += st.size; }
+      }
+      if (files >= ASSET_MAX_FILES || total + bytes.length > ASSET_MAX_BYTES) {
+        throw fail(507, `image storage is full (${ASSET_MAX_FILES} files / ${ASSET_MAX_BYTES >> 20} MB) — free space with "Clean unused images" in Notes`);
+      }
+      const id = crypto.randomBytes(16).toString('hex');
+      const name = `${id}.${info.ext}`;
+      const tmp = path.join(dir, `.${id}.tmp`);
+      try {
+        await fs.writeFile(tmp, bytes, { flag: 'wx', mode: 0o600 });
+        await fs.rename(tmp, path.join(dir, name));
+      } catch (e) {
+        await fs.rm(tmp, { force: true });
+        throw e;
+      }
+      res.status(201);
+      return { id, name, url: `/notes/assets/${name}`, bytes: bytes.length, type: info.type };
+    });
+  }));
+
+// Outside /api so <img> can load it, which means the gate above does not cover it: the session
+// is checked here. The name is matched against an exact shape before it touches the disk, and
+// is only ever resolved inside the caller's own folder, so another person's id is simply a 404.
+app.get('/notes/assets/:name', (req, res) => {
+  const found = sessionUser(sidOf(req));
+  if (!found) return res.status(401).json({ error: 'not authenticated' });
+  if (!allows(found.user, 'notes:read')) return res.status(403).json({ error: 'not allowed — needs notes:read' });
+  const name = req.params.name;
+  const dir = path.resolve(assetDir(found.user.id));
+  const abs = path.resolve(dir, name);
+  const miss = () => res.status(404).json({ error: 'not found' });
+  if (req.path.endsWith('/')) return miss(); // one canonical URL per image
+  if (!ASSET_NAME.test(name) || !abs.startsWith(dir + path.sep)) return miss();
+  fs.lstat(abs).then(async (st) => {
+    if (!st.isFile() || st.isSymbolicLink()) return miss();
+    const body = await fs.readFile(abs);
+    res.set({
+      // Fixed by extension, never by content: the file can only ever be served as an image.
+      'Content-Type': IMG_MIME[name.split('.')[1]],
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'none'; sandbox",
+      'Content-Disposition': 'inline',
+      'Cross-Origin-Resource-Policy': 'same-origin',
+      'Referrer-Policy': 'no-referrer',
+      // Ids are never reused, so the bytes behind one never change.
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      ETag: `"${name.split('.')[0]}"`,
+    });
+    res.send(body); // also answers If-None-Match with 304, and HEAD without a body
+  }).catch(miss);
+});
 
 /* ---------- Spotify ---------- */
 
@@ -1548,6 +1742,15 @@ async function tick() {
 }
 
 app.use(express.static(path.join(DIR, 'public')));
+
+// Last: body-parser failures (413 too large, 400 malformed) as JSON like every other error,
+// and never a stack trace or a disk path.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status === 500) console.error('[http]', err.message);
+  res.status(status).json({ error: status === 413 ? 'upload too large (images: 5 MB max)' : status < 500 ? err.message : 'server error' });
+});
 
 // Behind a proxy, bind to loopback (HOST=127.0.0.1) so the port cannot be reached directly —
 // otherwise :3000 is a way in that skips nginx and its rate limit entirely.
