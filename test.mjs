@@ -488,6 +488,8 @@ assert.deepEqual(parseNote('---\ntags: one, Two\n---\n').tags, ['one', 'two']);
 assert.deepEqual(parseNote('---\ntitle: x\ntags:\n  - L1\n  - #l2\nother: 1\n---\n').tags, ['l1', 'l2']);
 assert.deepEqual(parseNote('see [[Foo]], [[dir/Bar|alias]] and [[Foo#sec]] [[Baz.md]]').links, ['Foo', 'dir/Bar', 'Baz']);
 
+assert.deepEqual(parseNote('| a |\n|---|\n| [[x\\|alias]] [[y\\|b]] [[z#s\\|c]] |').links, ['x', 'y', 'z'], 'escaped alias pipe');
+
 const paths = ['Foo.md', 'proj/Foo.md', 'proj/Bar.md', 'misc/baz.md'];
 assert.equal(resolveLink('proj/Foo', paths), 'proj/Foo.md', 'exact path wins');
 assert.equal(resolveLink('Foo', paths), 'Foo.md', 'alphabetical first basename');
@@ -509,6 +511,9 @@ assert.deepEqual(rw('[[old|al]] [[x/old#sec]] [[x/old.md|z]] [[other]]', 'x/old.
   { body: '[[new|al]] [[x/new#sec]] [[x/new.md|z]] [[other]]', n: 3 });
 assert.deepEqual(rw('[[old]] [[x/old]]', 'x/old.md', 'z/old.md'),
   { body: '[[old]] [[z/old]]', n: 1 }, 'folder move leaves [[basename]] alone');
+assert.deepEqual(rw('| [[old\\|al]] | [[x/old#s\\|z]] |', 'x/old.md', 'x/new.md'),
+  { body: '| [[new\\|al]] | [[x/new#s\\|z]] |', n: 2 }, 'escaped alias kept on rewrite');
+assert.deepEqual(backlinksOf([{ rel: 'a.md', links: parseNote('[[old\\|al]]').links }, { rel: 'x/old.md', links: [] }], 'x/old.md'), ['a.md'], 'backlink through \\|');
 assert.equal(rw('nothing [[a]]', 'x/old.md', 'x/new.md').n, 0);
 
 const nentries = [

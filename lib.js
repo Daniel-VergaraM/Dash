@@ -167,7 +167,9 @@ export function notePath(raw) {
 const stripCode = (s) => s.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
 const FRONT_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
 const TAG_RE = /(^|\s)#([A-Za-z][\w/-]{0,39})/gm;
-const LINK_RE = /\[\[([^[\]|#\n]+)((?:#[^[\]|\n]*)?)((?:\|[^[\]\n]*)?)\]\]/g;
+// `\|` is the table-cell escape for `|`; the backslash is not part of the target and is kept
+// (inside the alias group) when links are rewritten.
+const LINK_RE = /\[\[([^[\]|#\\\n]+)((?:#[^[\]|\\\n]*)?)((?:\\?\|[^[\]\n]*)?)\]\]/g;
 
 // Minimal frontmatter reader: only `tags:` is understood (inline list, comma list, or a
 // "- a" block). ponytail: not YAML; quoted commas and nested structures are not handled.

@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/public/logo-wordmark-dark.svg">
+    <img src="web/public/logo-wordmark.svg" alt="Dash" height="48">
+  </picture>
+</p>
+
 # Dash
 
 Personal dashboard: tasks, Google Calendar, markdown+LaTeX notes, Google Drive, Spotify, GitHub.
@@ -229,6 +236,8 @@ are `#tags` in the text or `tags:` in YAML frontmatter, and filter the list. `[[
 (also `[[note|alias]]`, `[[note#section]]`) links notes and feeds each note's Backlinks panel.
 The search box matches names and bodies. Rename / move rewrites the `[[links]]` that pointed at
 the old name.
+
+**Tables.** GFM tables render in the preview (`| a | b |`, then `|:--|--:|` for left/right and `:-:` for centre alignment). The **Table** button under the editor inserts a 3x3 template; inside a table, **Tab** / **Shift+Tab** jump to the next/previous cell, re-align the columns and add a row after the last cell. Press **Esc** then Tab to leave the editor. In a cell GFM needs the pipe escaped, so write a wiki alias as `[[note\|alias]]`; the preview and the backlinks also accept the unescaped `[[note|alias]]`, but GFM would split the cell there.
 
 ## Deliberately left out
 

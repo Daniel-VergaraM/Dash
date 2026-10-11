@@ -1,16 +1,21 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Table as TableIcon } from 'lucide-react';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { useAuth } from '../../context/AuthContext';
 import { jf, encodePath } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
+import { insertTable, tabInTable } from '../../lib/mdTable';
 import type { NoteMeta, NoteDoc } from '../../types';
 
 const stem = (name: string) => name.replace(/\.md$/, '');
 
-// [[x]] / [[x|alias]] / [[x#sec]] -> an internal link the `a` renderer below intercepts.
-const WIKI = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g;
+// [[x]] / [[x|alias]] / [[x#sec]] -> an internal link the `a` renderer below intercepts. The
+// replacement has no `|`, so it is safe inside a table cell; `[[x\|alias]]` (the escaped form
+// GFM needs when typed in a cell) is accepted too.
+const WIKI = /\[\[([^\]|#\\]+)(?:#[^\]|]*)?(?:\\?\|([^\]]+))?\]\]/g;
 // Fenced blocks and inline code are split out (odd indexes) and left untouched.
 const wikiToLinks = (md: string) => md.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, i) => i % 2 ? part
   : part.replace(WIKI, (_, t: string, alias?: string) =>
@@ -198,6 +203,36 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
   const shown = searching ? notes : [...notes].sort((a, b) => a.folder.localeCompare(b.folder) || a.name.localeCompare(b.name));
 
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  // Selection to restore once a table edit has re-rendered the controlled textarea.
+  const pendingSel = useRef<[number, number] | null>(null);
+  // Escape arms a one-shot "let the next Tab leave the editor" so tables never trap the keyboard.
+  const tabFree = useRef(false);
+  useLayoutEffect(() => {
+    const sel = pendingSel.current;
+    if (!sel) return;
+    pendingSel.current = null;
+    editorRef.current?.setSelectionRange(sel[0], sel[1]);
+  }, [body]);
+  // Replaces only the changed range through execCommand so the native Ctrl+Z stack survives;
+  // falls back to a plain controlled update when the browser refuses.
+  const applyEdit = (r: { text: string; sel: [number, number] }) => {
+    const el = editorRef.current;
+    if (el && r.text === body) { el.setSelectionRange(r.sel[0], r.sel[1]); return; }
+    pendingSel.current = r.sel;
+    if (el && el.value === body) {
+      let p = 0;
+      const max = Math.min(body.length, r.text.length);
+      while (p < max && body[p] === r.text[p]) p++;
+      let q = 0;
+      while (q < max - p && body[body.length - 1 - q] === r.text[r.text.length - 1 - q]) q++;
+      el.focus();
+      el.setSelectionRange(p, body.length - q);
+      let ok = false;
+      try { ok = document.execCommand('insertText', false, r.text.slice(p, r.text.length - q)); } catch { /* fall back */ }
+      if (ok && el.value === r.text) { el.setSelectionRange(r.sel[0], r.sel[1]); return; }
+    }
+    setBody(r.text);
+  };
   const { rowRef, onKeyDown, focusAt } = useListNav(shown.length, vimNav, {
     onRight: async (i) => {
       const n = shown[i];
@@ -250,7 +285,17 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
         </div>
         <textarea
           id="editor" ref={editorRef} value={body} aria-label="Note editor" readOnly={!current || !canWrite} onChange={(e) => setBody(e.target.value)}
+          onFocus={() => { tabFree.current = false; }} onBlur={() => { tabFree.current = false; }}
           onKeyDown={(e) => {
+            if (e.key === 'Escape') tabFree.current = true;
+            else if (e.key === 'Tab' && canWrite && current && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              if (tabFree.current) tabFree.current = false;
+              else {
+                const r = tabInTable(body, e.currentTarget.selectionStart, e.shiftKey);
+                if (r) { e.preventDefault(); applyEdit(r); }
+              }
+              return;
+            } else if (e.key !== 'Shift') tabFree.current = false;
             if (!vimNav || e.key !== 'Escape') return;
             e.preventDefault();
             const idx = shown.findIndex((n) => n.name === current);
@@ -261,11 +306,12 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
         <div className="previewCol">
           <div id="preview" role="region" aria-label="Preview">
             <ReactMarkdown
-              remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}
+              remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}
               components={{
                 a: ({ href, children }) => href?.startsWith('#note:')
                   ? <a href={href} onClick={(e) => { e.preventDefault(); let t = href.slice(6); try { t = decodeURIComponent(t); } catch { /* keep raw */ } openLink(t); }}>{children}</a>
                   : <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+                table: ({ children }) => <div className="tablewrap"><table>{children}</table></div>,
               }}
             >
               {wikiToLinks(previewBody)}
@@ -281,7 +327,17 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
       </div>
       <div className="row small muted" style={{ marginTop: 8 }}>
         {saveErr ? <span className="err" role="alert">{saveErr}</span> : <span>{dirty ? current + ' · unsaved…' : status}</span>}
-        <button style={{ marginLeft: 'auto' }} onClick={renameNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Rename / move</button>
+        <button
+          style={{ marginLeft: 'auto' }} disabled={!current || !canWrite}
+          title={canWrite ? 'Insert a table. In a table, Tab / Shift+Tab move between cells; Esc then Tab leaves the editor.' : 'Requires notes:write'}
+          onClick={() => {
+            const el = editorRef.current;
+            if (!el) return;
+            applyEdit(insertTable(body, el.selectionStart, el.selectionEnd));
+            el.focus();
+          }}
+        ><TableIcon size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Table</button>
+        <button onClick={renameNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Rename / move</button>
         <button onClick={delNote} disabled={!current || !canWrite} title={canWrite ? undefined : 'Requires notes:write'}>Delete note</button>
       </div>
     </>

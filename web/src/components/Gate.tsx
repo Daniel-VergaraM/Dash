@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { jf } from '../lib/api';
+import { Mark } from './Mark';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../lib/webauthn';
 import { useAuth } from '../context/AuthContext';
 
@@ -51,7 +52,7 @@ export default function Gate() {
   return (
     <div id="gate">
       <form id="loginForm" onSubmit={onSubmit}>
-        <div className="mark">D</div>
+        <Mark size={46} />
         <h1>Dash</h1>
         <p>Sign in to continue</p>
         <input

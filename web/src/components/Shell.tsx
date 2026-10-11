@@ -3,6 +3,7 @@ import {
   Home, Inbox as InboxIcon, ListChecks, CalendarDays, FileText, FolderOpen, Music, Github, User, ShieldCheck, LogOut, X, Bell,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { Mark } from './Mark';
 import type { Capability, ViewName } from '../types';
 import { jf } from '../lib/api';
 import { getKbdMode, setKbdMode as persistKbdMode, getVimNav, setVimNav as persistVimNav } from '../lib/kbdMode';
@@ -155,7 +156,7 @@ export default function Shell() {
       <a href="#main" className="skip-link">Skip to content</a>
       <nav>
         <div className="brand" title="Press g then a letter to jump to a view (e.g. g t for Today)">
-          <span className="mark" />DASH
+          <Mark size={24} />DASH
         </div>
         {canNotify && (
           <div className="bellwrap">
