@@ -9,8 +9,8 @@ interface InboxData { items: InboxItem[]; warnings: string[]; }
 
 const SOURCE = { google: 'Task', linear: 'Linear', github: 'GitHub' } as const;
 
-export default function Inbox({ active, vimNav, onOpenTasks }: {
-  active: boolean; vimNav: boolean; onOpenTasks: () => void;
+export default function Inbox({ active, vimNav, onOpenTasks, refreshKey }: {
+  active: boolean; vimNav: boolean; onOpenTasks: () => void; refreshKey?: number;
 }) {
   const [data, setData] = useState<InboxData | null>(null);
   const [err, setErr] = useState<ApiError | null>(null);
@@ -23,7 +23,7 @@ export default function Inbox({ active, vimNav, onOpenTasks }: {
     jf<InboxData>('/api/inbox' + (refresh ? '?refresh=1' : '')).then(setData).catch((e) => setErr(e as ApiError));
   }, []);
 
-  useEffect(() => { if (active) load(); }, [active, load]);
+  useEffect(() => { if (active) load(); }, [active, refreshKey, load]);
 
   const items = data?.items ?? [];
   // Plain tasks have no URL of their own, so Enter on one jumps to the Tasks view.

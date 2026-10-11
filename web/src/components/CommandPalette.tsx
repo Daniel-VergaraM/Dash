@@ -2,14 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { jf } from '../lib/api';
 import type { SearchResults, ViewName } from '../types';
 
-interface Entry { key: string; group: string; label: string; hint?: string; run: () => void; }
+interface Entry { key: string; group: string; label: string; hint?: string; alias?: string; run: () => void; }
 
-export default function CommandPalette({ views, canAddTask, onClose, onGo, onNewTask, onOpenTask, onOpenNote }: {
+export default function CommandPalette({ views, canAddTask, onClose, onGo, onNewTask, onQuickAdd, onOpenTask, onOpenNote }: {
   views: { view: ViewName; label: string }[];
   canAddTask: boolean;
   onClose: () => void;
   onGo: (v: ViewName) => void;
   onNewTask: () => void;
+  onQuickAdd: () => void;
   onOpenTask: (id: string) => void;
   onOpenNote: (name: string) => void;
 }) {
@@ -21,8 +22,10 @@ export default function CommandPalette({ views, canAddTask, onClose, onGo, onNew
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  // Read during render, before autoFocus moves focus into the dialog.
+  const [prevFocus] = useState(() => document.activeElement as HTMLElement | null);
+
   useEffect(() => {
-    const prevFocus = document.activeElement as HTMLElement | null;
     // Capture on window runs before any document-level handler (e.g. ProjectsModal's own
     // Escape), so closing the palette never also closes what is under it.
     const onKey = (e: KeyboardEvent) => {
@@ -38,8 +41,8 @@ export default function CommandPalette({ views, canAddTask, onClose, onGo, onNew
       }
     };
     window.addEventListener('keydown', onKey, true);
-    return () => { window.removeEventListener('keydown', onKey, true); prevFocus?.focus(); };
-  }, []);
+    return () => { window.removeEventListener('keydown', onKey, true); if (prevFocus?.isConnected) prevFocus.focus(); };
+  }, [prevFocus]);
 
   // Debounced, and a newer keystroke aborts the request still in flight.
   useEffect(() => {
@@ -58,8 +61,12 @@ export default function CommandPalette({ views, canAddTask, onClose, onGo, onNew
     const open = (url: string) => () => { window.open(url, '_blank', 'noopener'); };
     const out: Entry[] = [];
     for (const v of views) out.push({ key: 'go:' + v.view, group: 'Go to', label: v.label, run: () => onGo(v.view) });
-    if (canAddTask) out.push({ key: 'new-task', group: 'Actions', label: 'New task', run: onNewTask });
-    const local = term ? out.filter((e) => e.label.toLowerCase().includes(term)) : out;
+    if (canAddTask) {
+      // `alias` lets "nueva tarea" / "new task" find the quick modal as well.
+      out.push({ key: 'quick-add', group: 'Actions', label: 'Quick add', hint: 'c', alias: 'nueva tarea new task captura', run: onQuickAdd });
+      out.push({ key: 'new-task', group: 'Actions', label: 'New task', run: onNewTask });
+    }
+    const local = term ? out.filter((e) => `${e.label} ${e.alias ?? ''}`.toLowerCase().includes(term)) : out;
     const res = found && found.term === q.trim() ? found.data : null;
     if (!res) return local;
     return [
@@ -70,7 +77,7 @@ export default function CommandPalette({ views, canAddTask, onClose, onGo, onNew
       ...res.repos.map((r) => ({ key: 'r:' + r.name, group: 'Repositories', label: r.name, run: open(r.url) })),
       ...res.prs.map((p) => ({ key: 'p:' + p.url, group: 'Pull requests', label: p.title, hint: p.repo, run: open(p.url) })),
     ];
-  }, [q, found, views, canAddTask, onGo, onNewTask, onOpenTask, onOpenNote]);
+  }, [q, found, views, canAddTask, onGo, onNewTask, onQuickAdd, onOpenTask, onOpenNote]);
 
   useEffect(() => { setIdx(0); }, [entries.length]);
 

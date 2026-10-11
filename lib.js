@@ -64,6 +64,17 @@ export function taskWindow(start, minutes, tz) {
   return { start: s.toISOString(), end: new Date(s.getTime() + mins * 60000).toISOString() };
 }
 
+// The calendar date Google Tasks should file a task under, in the user's own zone. A naive
+// "YYYY-MM-DDTHH:mm" already is that zone's wall clock, so its date part is the answer; an
+// absolute instant (Z / +HH:mm) is converted to the zone's date. Date-only passes through.
+export function dueDate(start, tz) {
+  const raw = String(start ?? '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) throw Object.assign(new Error('bad start time'), { status: 400 });
+  const { start: iso } = taskWindow(raw, 30, tz);
+  return /Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? localNow(tz, new Date(iso)).date : raw.slice(0, 10);
+}
+
 /* ---------- command palette search ---------- */
 
 // Which sources a person may search; each maps to the capability that already guards its page.
@@ -366,4 +377,159 @@ export function digestItem({ events = [], inboxItems = [], tz, now = new Date() 
     title: `Your day, ${today}`,
     body: lines.join('\n') || 'Nothing scheduled today.',
   };
+}
+
+/* ---------- quick capture ---------- */
+
+// Lowercase, accents stripped: "Mañana" -> "manana", so every keyword is matched once.
+const plain = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+const DAYS = new Map(Object.entries({
+  domingo: 0, sunday: 0, sun: 0, lunes: 1, monday: 1, mon: 1, martes: 2, tuesday: 2, tue: 2,
+  miercoles: 3, wednesday: 3, wed: 3, jueves: 4, thursday: 4, thu: 4, viernes: 5, friday: 5, fri: 5,
+  sabado: 6, saturday: 6, sat: 6,
+}));
+
+const addDays = (day, n) => {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+const realDate = (y, m, d) => {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+};
+
+// "15h" / "9h": a whole number 9..23 followed by h reads as an hour of the day, not a duration.
+// Durations stay "2h", "8h" or any decimal ("1.5h"); "horas"/"hours" are always durations.
+const HOUR_H = /^(\d{1,2})h$/;
+const isHourH = (k) => { const m = HOUR_H.exec(k); return !!m && +m[1] >= 9 && +m[1] <= 23; };
+
+// Minutes since midnight for "3pm", "3:30pm", "15:00", "15h"; `bare` also allows a lone "15"
+// (only after "a las"/"at", where the context makes it unambiguous). null when it is not a clock.
+function clock(k, bare) {
+  if (isHourH(k)) return parseInt(k, 10) * 60;
+  const m = /^(\d{1,2})(?::(\d{2}))?(am|pm)?$/.exec(k);
+  if (!m) return null;
+  let h = +m[1];
+  const mi = m[2] ? +m[2] : 0;
+  if (mi > 59) return null;
+  if (m[3]) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (m[3] === 'pm' ? 12 : 0);
+  } else if (h > 23 || !(bare || m[2])) return null;
+  return h * 60 + mi;
+}
+
+// Natural-language task line -> task fields. Tokens are recognised anywhere, in Spanish or
+// English, ignoring case and accents; whatever is not a token becomes the title, and text in
+// "quotes" is kept verbatim. `due` uses the same shapes POST /api/tasks takes as `start`.
+// Only the first date / time / priority / project / duration counts; repeats stay in the title.
+// ponytail: whole-word tokens only, so "1/2" in a title reads as a date; quote it to keep it.
+// `projectsFailed`: the project list could not be loaded, so "!name" is reported as that.
+export function parseQuick(text, { now = new Date(), tz, projects = [], projectsFailed = false } = {}) {
+  // An unclosed quote is a literal token of its own: not a delimiter, not glued to the next word.
+  const toks = [...String(text ?? '').matchAll(/"([^"]*)"|(")|[^\s"]+/g)].map((m) => (
+    m[1] !== undefined ? { raw: m[1], lit: true } : m[2] ? { raw: '"', lit: true }
+      : { raw: m[0], k: plain(m[0]).replace(/[,.;:]+$/, '') }));
+  const at = (i) => (toks[i] && !toks[i].lit ? toks[i].k : '');
+  const today = localNow(tz, now);
+  const title = [];
+  const warnings = [];
+  let day = null, mins = null, priority = null, duration = null, projectTok = null;
+
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.lit) { if (t.raw.trim()) title.push(t.raw); continue; }
+    const k = t.k;
+    const nx = at(i + 1);
+    let m;
+
+    if (priority === null && (m = /^p([123])$/.exec(k))) { priority = ['high', 'med', 'low'][m[1] - 1]; continue; }
+    if (projectTok === null && (m = /^!([\p{L}\p{N}][\p{L}\p{N}_-]*)$/u.exec(k))) { projectTok = m[1]; continue; }
+    if (duration === null && !isHourH(k) && (m = /^(\d+(?:[.,]\d+)?)(m|min|mins|h|hr|hrs|hora|horas|hour|hours)$/.exec(k))) {
+      const v = Math.round(parseFloat(m[1].replace(',', '.')) * (m[2][0] === 'h' ? 60 : 1));
+      if (v >= 5 && v <= 1440) { duration = v; continue; }
+    }
+
+    if (mins === null) {
+      let c = clock(k, false);
+      if (c !== null) { mins = c; continue; }
+      const prefix = (k === 'a' && (nx === 'las' || nx === 'la')) ? 2 : k === 'at' ? 1 : 0;
+      if (prefix) {
+        const kt = at(i + prefix);
+        c = clock(kt, true);
+        const sfx = at(i + prefix + 1);
+        // "at 3 pm" / "a las 3 pm": the meridiem is its own word.
+        if (c !== null && !/(am|pm)$/.test(kt) && (sfx === 'am' || sfx === 'pm')) {
+          c = clock(kt + sfx, true);
+          if (c !== null) { mins = c; i += prefix + 1; continue; }
+        } else if (c !== null) { mins = c; i += prefix; continue; }
+      }
+    }
+
+    if (day === null) {
+      if (k === 'hoy' || k === 'today') { day = today.date; continue; }
+      if (k === 'manana' || k === 'tomorrow') { day = addDays(today.date, 1); continue; }
+      if (k === 'pasado' && nx === 'manana') { day = addDays(today.date, 2); i += 1; continue; }
+
+      const lead = /^(este|proximo|next|this)$/.test(k) && DAYS.has(nx);
+      const w = DAYS.get(lead ? nx : k);
+      if (w !== undefined) {
+        // Strictly future: on a Friday, "viernes" means next week's.
+        const cur = new Date(`${today.date}T00:00:00Z`).getUTCDay();
+        day = addDays(today.date, ((w - cur + 7) % 7) || 7);
+        if (lead) i += 1;
+        continue;
+      }
+
+      const unit = at(i + 2);
+      if ((k === 'en' || k === 'in') && /^\d{1,3}$/.test(nx) && /^(dias?|days?|semanas?|weeks?)$/.test(unit)) {
+        day = addDays(today.date, +nx * (/^(s|w)/.test(unit) ? 7 : 1));
+        i += 2;
+        continue;
+      }
+
+      if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k)) && realDate(+m[1], +m[2], +m[3])) { day = k; continue; }
+      if ((m = /^(\d{1,2})[/-](\d{1,2})$/.exec(k))) {
+        const [d, mo] = [+m[1], +m[2]];
+        const pad = (n) => String(n).padStart(2, '0');
+        // First occurrence from today on; 29/2 rolls to the next leap year (at most 8 years out).
+        const y0 = +today.date.slice(0, 4);
+        let found = null;
+        for (let y = y0; y <= y0 + 8 && !found; y++) {
+          const s = `${y}-${pad(mo)}-${pad(d)}`;
+          if (realDate(y, mo, d) && s >= today.date) found = s;
+        }
+        if (found) { day = found; continue; }
+        warnings.push(`Fecha no válida: "${t.raw}"`);
+      }
+    }
+
+    title.push(t.raw);
+  }
+
+  // A time with no date means the next time that clock reads that: today unless it has passed.
+  if (day === null && mins !== null) day = mins > today.min ? today.date : addDays(today.date, 1);
+  const due = day === null ? null
+    : mins === null ? day : `${day}T${pad2(Math.floor(mins / 60))}:${pad2(mins % 60)}`;
+
+  let project = null;
+  if (projectTok !== null) {
+    const squash = (s) => plain(s).replace(/[\s_-]+/g, '');
+    const q = squash(projectTok);
+    const hits = projects.map((p) => ({ p, n: squash(p.name) })).filter((x) => x.n.startsWith(q))
+      .sort((a, b) => (b.n === q) - (a.n === q) || a.n.length - b.n.length);
+    if (projectsFailed) warnings.push('No se pudieron cargar los proyectos de Linear');
+    else if (!hits.length) warnings.push(`No Linear project matches "!${projectTok}"`);
+    else {
+      project = { id: hits[0].p.id, name: hits[0].p.name };
+      if (hits.length > 1 && hits[0].n !== q) warnings.push(`"!${projectTok}" matches ${hits.length} projects; using "${project.name}"`);
+    }
+  }
+
+  const out = title.join(' ').replace(/\s+/g, ' ').trim();
+  if (!out) warnings.push('Title is empty');
+  return { title: out, due, hasTime: due !== null && mins !== null, priority, project, duration, warnings };
 }

@@ -200,6 +200,22 @@ password hashing, role and capability resolution, passkey storage, and the store
 (sessions, suspension, the last-admin guard, rollback on a rejected edit, persistence across
 restarts, and migration from the old 6-digit codes).
 
+## Quick capture
+
+Press `c` (when not typing), or pick **Quick add** in the Ctrl+K palette, and type one line. A live preview shows what was understood; Enter creates the task. Needs `tasks:write`.
+
+```
+mañana 3pm revisar PR !dash p1 30m
+```
+
+- **Date**: `hoy/today`, `mañana/tomorrow`, `pasado mañana`, a weekday (`viernes`, `next friday`: always strictly in the future), `en 3 días` / `in 2 weeks`, `2026-12-31`, `25/12` or `25-12` (next year if already passed; `29/2` rolls to the next leap year). An impossible date (`31/2`) stays in the title with a warning.
+- **Time**: `3pm`, `3:30pm`, `15:00`, `15h`, `a las 15`, `at 3pm`. A time without a date means today, or tomorrow if it already passed in your timezone. No time means an all-day task.
+- **Project**: `!name`, matched by prefix against your Linear projects (shortest match wins); an unknown one is dropped with a warning.
+- **Priority**: `p1` high, `p2` medium, `p3` low. **Duration**: `30m`, `1h`, `45min`, `1.5h` (5 min to 24 h); a whole number from 9 to 23 followed by `h` (`15h`) is a time of day, not a duration (`horas`/`hours` always mean duration).
+- Spanish or English, any case, accents optional, tokens anywhere; the rest is the title. `"quoted text"` is kept literally. Only the first of each token counts.
+
+`GET /api/quick/parse?text=` returns the interpretation without writing anything; `POST /api/tasks/quick` with `{ "text": "..." }` parses on the server and creates the task, answering `{ task, parsed }`. Text is limited to 300 characters.
+
 ## Notifications and notes
 
 **Notifications.** The bell in the sidebar lists reminders (a few minutes before a timed event or

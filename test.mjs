@@ -6,7 +6,7 @@ import {
   noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
   prioToLinear, prioFromLinear, inboxScore, inboxOrder, issuePatch, linearLink,
   notePath, parseNote, resolveLink, backlinksOf, rewriteLinks, filterNotes,
-  localNow, cleanNotify, dueReminders, digestDue, digestItem,
+  localNow, dueDate, cleanNotify, dueReminders, digestDue, digestItem, parseQuick,
 } from './lib.js';
 import {
   initNotify, getSettings, setSettings, feedOf, unreadOf, markRead, push,
@@ -67,6 +67,147 @@ assert.equal(cleanTimezone('America/Mexico_City'), 'America/Mexico_City');
 assert.equal(cleanTimezone('Not/AZone'), null);
 assert.equal(cleanTimezone(null), null);
 assert.equal(cleanTimezone(42), null);
+
+/* ---------- quick capture ---------- */
+
+{
+  // Sunday 2026-10-11 10:00 in Bogota (UTC-5); in Tokyo it is already Monday 2026-10-12 00:00.
+  const now = new Date('2026-10-11T15:00:00Z');
+  const P = [{ id: 'p1', name: 'Dash' }, { id: 'p2', name: 'Dashboard Ops' }, { id: 'p3', name: 'Cámara' }];
+  const q = (t, o = {}) => parseQuick(t, { now, tz: 'America/Bogota', projects: P, ...o });
+  const due = (t, o) => q(t, o).due;
+
+  assert.deepEqual(q('mañana 3pm revisar PR !dash p1'), {
+    title: 'revisar PR', due: '2026-10-12T15:00', hasTime: true, priority: 'high',
+    project: { id: 'p1', name: 'Dash' }, duration: null, warnings: [],
+  });
+  assert.equal(due('hoy x'), '2026-10-11');
+  assert.equal(due('TODAY x'), '2026-10-11');
+  assert.equal(due('Tomorrow x'), '2026-10-12');
+  assert.equal(due('pasado mañana x'), '2026-10-13');
+  assert.equal(due('pasado manana x'), '2026-10-13');
+  assert.equal(due('x'), null);
+  assert.equal(due('hoy x', { tz: 'Asia/Tokyo' }), '2026-10-12', 'today is read in the user zone');
+
+  // Every weekday, strictly after Sunday 2026-10-11: the current weekday means next week.
+  const week = {
+    lunes: 12, martes: 13, miercoles: 14, miércoles: 14, jueves: 15, viernes: 16, sabado: 17, sábado: 17, domingo: 18,
+    monday: 12, tuesday: 13, wednesday: 14, thursday: 15, friday: 16, saturday: 17, sunday: 18,
+    mon: 12, tue: 13, wed: 14, thu: 15, fri: 16, sat: 17, sun: 18,
+  };
+  for (const [w, d] of Object.entries(week)) assert.equal(due(`x ${w}`), `2026-10-${d}`, w);
+  assert.equal(due('este viernes x'), '2026-10-16');
+  assert.equal(due('next friday x'), '2026-10-16');
+  assert.equal(due('Próximo Lunes x'), '2026-10-12');
+  assert.equal(q('x next friday').title, 'x');
+  assert.equal(due('hoy es domingo y escribo domingo', { tz: 'Asia/Tokyo' }), '2026-10-12', 'Monday in Tokyo: "domingo" is the 18th, hoy wins');
+  assert.equal(due('lunes', { tz: 'Asia/Tokyo' }), '2026-10-19', 'Monday in Tokyo -> next week');
+  assert.equal(q('x domingo y domingo').title, 'x y domingo', 'only the first date counts');
+
+  assert.equal(due('en 3 días x'), '2026-10-14');
+  assert.equal(due('in 1 day x'), '2026-10-12');
+  assert.equal(due('en 2 semanas x'), '2026-10-25');
+  assert.equal(due('in 2 weeks x'), '2026-10-25');
+  assert.equal(due('en 5 x'), null, 'no unit, no date');
+  assert.equal(due('x 2026-12-31'), '2026-12-31');
+  assert.equal(due('x 2026-02-30'), null, 'impossible ISO date stays text');
+  assert.equal(due('x 25/12'), '2026-12-25');
+  assert.equal(due('x 5-11'), '2026-11-05');
+  assert.equal(due('x 10/10'), '2027-10-10', 'already passed -> next year');
+  assert.equal(due('x 11/10'), '2026-10-11', 'today stays this year');
+  assert.equal(due('x 31/2'), null);
+  assert.equal(due('x 29/2'), '2028-02-29', '29/2 rolls to the next leap year');
+  assert.equal(due('x 29/2', { now: new Date('2028-03-01T12:00:00Z') }), '2032-02-29');
+  assert.equal(q('x 29/2').title, 'x');
+  for (const bad of ['31/2', '0/5', '13/13', '32/1']) {
+    const r = q(`x ${bad}`);
+    assert.deepEqual([r.due, r.title, r.warnings.length], [null, `x ${bad}`, 1], bad);
+    assert.match(r.warnings[0], /no válida/);
+  }
+  assert.deepEqual(q('x !dash', { projects: [], projectsFailed: true }).warnings, ['No se pudieron cargar los proyectos de Linear']);
+  assert.equal(q('x !dash', { projects: [], projectsFailed: true }).project, null);
+  // Unclosed quote: literal, neither a delimiter nor glued to the next word.
+  assert.equal(q('x "mañana').due, '2026-10-12');
+  assert.equal(q('x "mañana').title, 'x "');
+  assert.equal(q('"a b" y "c').title, 'a b y " c');
+
+  for (const [t, hm] of [['3pm', '15:00'], ['3:30pm', '15:30'], ['15:00', '15:00'], ['12am', '00:00'], ['12pm', '12:00'],
+    ['a las 3pm', '15:00'], ['a las 15', '15:00'], ['a las 9:30', '09:30'], ['at 3pm', '15:00'], ['at 3 pm', '15:00'], ['a la 1pm', '13:00']]) {
+    const r = q(`x mañana ${t}`);
+    assert.deepEqual([r.due, r.hasTime, r.title], [`2026-10-12T${hm}`, true, 'x'], t);
+  }
+  assert.equal(q('x mañana').hasTime, false);
+  assert.equal(due('x 13pm'), null);
+  assert.equal(due('x 25:00'), null);
+  assert.equal(due('x 15'), null, 'a bare number is not a time');
+  for (const [t, hm] of [['15h', '15:00'], ['a las 15h', '15:00'], ['9h', '09:00'], ['23h', '23:00']]) assert.equal(q(`x mañana ${t}`).due, `2026-10-12T${hm}`, t);
+  assert.equal(q('reunión 15h mañana').duration, null);
+  assert.equal(q('reunión 15h mañana').due, '2026-10-12T15:00');
+  for (const [t, n] of [['2h', 120], ['8h', 480], ['1.5h', 90], ['12.5h', 750], ['15 horas', null], ['15horas', 900]]) assert.equal(q(`x ${t}`).duration, n, t);
+  assert.equal(q('x 15').title, 'x 15');
+  assert.equal(due('x 11:00'), '2026-10-11T11:00', 'later today');
+  assert.equal(due('x 10:00'), '2026-10-12T10:00', 'not strictly later: tomorrow');
+  assert.equal(due('x 9am'), '2026-10-12T09:00', 'already passed: tomorrow');
+  assert.equal(due('x 9am', { tz: 'Asia/Tokyo' }), '2026-10-12T09:00', 'Tokyo is at 00:00, so 9am is still ahead');
+
+  assert.deepEqual(q('x !cam').project, { id: 'p3', name: 'Cámara' });
+  assert.deepEqual(q('x !CAMARA').project, { id: 'p3', name: 'Cámara' });
+  assert.deepEqual(q('x !dashb').project, { id: 'p2', name: 'Dashboard Ops' });
+  assert.deepEqual(q('x !dash').project, { id: 'p1', name: 'Dash' }, 'exact beats longer prefix');
+  assert.deepEqual(q('x !dash').warnings, []);
+  assert.deepEqual(q('x !das').project, { id: 'p1', name: 'Dash' }, 'ambiguous: shortest wins');
+  assert.equal(q('x !das').warnings.length, 1);
+  assert.deepEqual(q('x !dashboardops').project, { id: 'p2', name: 'Dashboard Ops' });
+  {
+    const r = q('x !nope');
+    assert.deepEqual([r.project, r.title, r.warnings.length], [null, 'x', 1]);
+    assert.match(r.warnings[0], /!nope/);
+    assert.equal(q('x !dash', { projects: [] }).project, null);
+  }
+  assert.deepEqual([q('p1 x').priority, q('x P2').priority, q('x p3').priority], ['high', 'med', 'low']);
+  assert.equal(q('x p4').priority, null);
+  assert.equal(q('x p4').title, 'x p4');
+  for (const [t, n] of [['30m', 30], ['1h', 60], ['45min', 45], ['1.5h', 90], ['1,5h', 90], ['2', null]]) {
+    assert.equal(q(`x ${t}`).duration, n, t);
+  }
+  assert.equal(q('x 2m').duration, null, 'below the 5 minute floor');
+  assert.equal(q('x 30m').title, 'x');
+
+  assert.equal(q('"mañana 3pm !dash p1" hoy').title, 'mañana 3pm !dash p1');
+  assert.equal(q('"mañana 3pm !dash p1" hoy').due, '2026-10-11');
+  assert.deepEqual([q('"mañana 3pm"').due, q('"mañana 3pm"').project], [null, null]);
+  assert.equal(q('revisar "p1" ahora p2').title, 'revisar p1 ahora');
+  assert.equal(q('mañana p1').title, '');
+  assert.ok(q('mañana p1').warnings.includes('Title is empty'));
+  assert.equal(q('').title, '');
+  assert.equal(q('   ').due, null);
+  assert.equal(q('! hola').title, '! hola');
+  assert.equal(q('p10 hola').title, 'p10 hola');
+  assert.equal(q('p10 hola').priority, null);
+  assert.equal(q('mañanas pasadomañana tomorrowland hoyo').due, null);
+  assert.equal(q('mañanas pasadomañana tomorrowland hoyo').title, 'mañanas pasadomañana tomorrowland hoyo');
+  assert.equal(q('MAÑANA, MANANA 3PM x').title, 'MANANA x', 'case and accents do not matter; first date wins');
+  assert.equal(q('Revisar PR del Módulo').title, 'Revisar PR del Módulo');
+  assert.equal(q('x en 2 dias y !dash p1 30m a las 4pm').title, 'x y');
+}
+
+/* ---------- due date for Google Tasks ---------- */
+
+{
+  // Naive local strings keep their own date; late/early hours must not drift by the UTC offset.
+  assert.equal(dueDate('2026-10-12T23:00', 'America/Bogota'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T08:00', 'Asia/Tokyo'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T09:00', 'Pacific/Auckland'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T00:30', 'America/Bogota'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12', 'Asia/Tokyo'), '2026-10-12', 'date only passes through');
+  // Absolute instants are read in the user's zone.
+  assert.equal(dueDate('2026-10-13T04:00:00.000Z', 'America/Bogota'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T23:00:00Z', 'Asia/Tokyo'), '2026-10-13');
+  assert.equal(dueDate('2026-10-12T05:00:00Z', 'Pacific/Auckland'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T23:00:00-05:00', 'America/Bogota'), '2026-10-12');
+  assert.equal(dueDate('2026-10-12T23:00:00+13:00', 'Pacific/Auckland'), '2026-10-12');
+  assert.throws(() => dueDate('nope', 'Asia/Tokyo'), /bad start time/);
+}
 
 /* ---------- input cleaning ---------- */
 
@@ -530,10 +671,13 @@ assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.'
         if (m) { clearTimeout(t); resolve(Number(m[1])); }
       });
     });
-    for (const p of ['/api/search?q=ab', '/api/inbox', '/api/tasks', '/api/notifications', '/api/notes']) {
+    for (const p of ['/api/search?q=ab', '/api/inbox', '/api/tasks', '/api/notifications', '/api/notes', '/api/quick/parse?text=x']) {
       const r = await fetch(`http://127.0.0.1:${port}${p}`);
       assert.equal(r.status, 401, `${p} requires a session`);
     }
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/tasks/quick`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'x' }),
+    })).status, 401, 'quick create requires a session');
 
     // Signed in as the bootstrap admin: nested notes round-trip and nothing escapes the
     // person's own notes dir.
@@ -548,6 +692,15 @@ assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.'
     const call = (m, p, body) => fetch(base + p, {
       method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body),
     });
+
+    // Quick capture: parsing is read-only, and an empty title is refused before anything is created.
+    const parse = (text) => call('GET', '/api/quick/parse?text=' + encodeURIComponent(text));
+    const qp = await (await parse('mañana 3pm revisar PR p1 30m')).json();
+    assert.deepEqual([qp.title, qp.priority, qp.duration, qp.hasTime, qp.project], ['revisar PR', 'high', 30, true, null]);
+    assert.match((await (await parse('x !dash')).json()).warnings[0], /proyectos de Linear/);
+    assert.equal((await parse('x'.repeat(301))).status, 400);
+    assert.equal((await call('POST', '/api/tasks/quick', { text: 'mañana p1' })).status, 400);
+    assert.equal((await call('POST', '/api/tasks/quick', { text: 'x'.repeat(301) })).status, 400);
 
     assert.equal((await call('PUT', '/api/notes/a/b.md', { body: 'hi #t1' })).status, 200);
     assert.equal((await call('PUT', '/api/notes/c.md', { body: 'see [[a/b]] and [[b]]' })).status, 200);

@@ -175,6 +175,14 @@ button.danger:hover { border-color: var(--bad); background: rgba(255,123,114,.08
   width: min(560px, 92vw); max-height: 70vh; display: flex; flex-direction: column; box-shadow: var(--shadow);
   align-self: start; margin-top: 12vh; }
 #palette input { width: 100%; padding: 10px 12px; }
+#quick { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+  width: min(560px, 92vw); box-shadow: var(--shadow); align-self: start; margin-top: 12vh; }
+#quick h3 { margin: 0 0 10px; }
+#quick input { width: 100%; padding: 10px 12px; }
+#quick .quick-prev { min-height: 28px; margin: 8px 0 4px; }
+#quick p { margin: 6px 0; }
+.toast { position: fixed; right: 16px; bottom: 16px; z-index: 40; padding: 8px 14px; border-radius: var(--radius-sm);
+  background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); max-width: min(420px, 90vw); }
 #palette ul.list { overflow: auto; margin-top: 8px; }
 #palette ul.list li { align-items: center; padding: 7px 8px; border-bottom: none; border-radius: var(--radius-sm); cursor: pointer; }
 #palette ul.list li.on { background: var(--panel2); outline: 1px solid var(--accent-dim); }

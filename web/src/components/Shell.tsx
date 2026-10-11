@@ -9,6 +9,7 @@ import { getKbdMode, setKbdMode as persistKbdMode, getVimNav, setVimNav as persi
 import { isTypingTarget } from '../lib/kbd';
 import { useNotifications } from '../lib/useNotifications';
 import CommandPalette from './CommandPalette';
+import QuickCapture from './QuickCapture';
 import NotificationsPanel from './NotificationsPanel';
 import Today from './views/Today';
 import Inbox from './views/Inbox';
@@ -42,6 +43,11 @@ export default function Shell() {
   const [kbdMode, setKbdModeState] = useState(() => getKbdMode());
   const [vimNav, setVimNavState] = useState(() => getVimNav());
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
+  // Bumped after a quick capture so whichever task view is active reloads.
+  const [taskTick, setTaskTick] = useState(0);
+  const [toast, setToast] = useState('');
+  const canQuick = can('tasks:write');
   const [taskReq, setTaskReq] = useState<{ id: string } | null>(null);
   const [noteReq, setNoteReq] = useState<{ name: string } | null>(null);
   const [bellOpen, setBellOpen] = useState(false);
@@ -79,6 +85,8 @@ export default function Shell() {
         if (target) { e.preventDefault(); setView(target.view); }
         return;
       }
+      // Same listener as the chord, so the key that finishes a chord (g c) never also opens this.
+      if (e.key === 'c' && !e.shiftKey && canQuick && !document.querySelector('[role="dialog"], [aria-modal="true"]')) { e.preventDefault(); setQuickOpen(true); return; }
       if (e.key === 'g') {
         chordActive = true;
         chordTimer = window.setTimeout(() => { chordActive = false; }, 800);
@@ -90,13 +98,13 @@ export default function Shell() {
       document.removeEventListener('keydown', onKeyDown);
       window.clearTimeout(chordTimer);
     };
-  }, [items]);
+  }, [items, canQuick]);
 
   // Ctrl/Cmd+K is the one shortcut that fires while typing: it does not collide with the
   // g-chord or useListNav, which both ignore any keypress with a modifier held.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen(true);
       }
@@ -120,6 +128,12 @@ export default function Shell() {
       e.preventDefault(); setNavFocusIdx(last); navRefs.current[last]?.focus();
     }
   }
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(''), 4000);
+    return () => window.clearTimeout(t);
+  }, [toast]);
 
   const closeBell = useCallback(() => { setBellOpen(false); bellRef.current?.focus(); }, []);
 
@@ -197,11 +211,11 @@ export default function Shell() {
       </nav>
 
       <main id="main" tabIndex={-1}>
-        <Section active={view === 'today'}><Today active={view === 'today'} vimNav={vimNav} /></Section>
+        <Section active={view === 'today'}><Today active={view === 'today'} vimNav={vimNav} refreshKey={taskTick} /></Section>
         <Section active={view === 'inbox'}>
-          <Inbox active={view === 'inbox'} vimNav={vimNav} onOpenTasks={() => setView('tasks')} />
+          <Inbox active={view === 'inbox'} vimNav={vimNav} onOpenTasks={() => setView('tasks')} refreshKey={taskTick} />
         </Section>
-        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} vimNav={vimNav} focusReq={taskReq} /></Section>
+        <Section active={view === 'tasks'}><Tasks active={view === 'tasks'} vimNav={vimNav} focusReq={taskReq} refreshKey={taskTick} /></Section>
         <Section active={view === 'calendar'}><CalendarView active={view === 'calendar'} /></Section>
         <Section active={view === 'notes'}><Notes active={view === 'notes'} vimNav={vimNav} openName={noteReq} /></Section>
         <Section active={view === 'drive'}><Drive active={view === 'drive'} vimNav={vimNav} /></Section>
@@ -222,6 +236,7 @@ export default function Shell() {
           canAddTask={can('tasks:write')}
           onClose={() => setPaletteOpen(false)}
           onGo={setView}
+          onQuickAdd={() => setQuickOpen(true)}
           onNewTask={() => {
             setView('tasks');
             setTimeout(() => document.querySelector<HTMLInputElement>('input[aria-label="Task"]')?.focus(), 0);
@@ -230,6 +245,17 @@ export default function Shell() {
           onOpenNote={(name) => { setNoteReq({ name }); setView('notes'); }}
         />
       )}
+      {quickOpen && (
+        <QuickCapture
+          onClose={() => setQuickOpen(false)}
+          onCreated={(task, parsed) => {
+            setQuickOpen(false);
+            setTaskTick((n) => n + 1);
+            setToast(task.warning ? `Task created. ${task.warning}` : `Created: ${parsed.title}`);
+          }}
+        />
+      )}
+      {toast && <div className="toast small" role="status">{toast}</div>}
     </div>
   );
 }

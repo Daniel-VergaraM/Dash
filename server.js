@@ -8,9 +8,9 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import {
   notePath, parseNote, backlinksOf, rewriteLinks, filterNotes,
-  macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches,
+  macFromArp, taskWindow, dueDate, startOfDay, searchSources, driveTerm, matches,
   prioFromLinear, linearLink, issuePatch, ymd, inboxScore, inboxOrder,
-  localNow, hmToMin, cleanNotify, dueReminders, digestDue, digestItem,
+  localNow, hmToMin, cleanNotify, dueReminders, digestDue, digestItem, parseQuick,
 } from './lib.js';
 import {
   CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
@@ -674,9 +674,7 @@ function shapeTask(t, meta = {}) {
 // The API wants an RFC 3339 timestamp but only reads the date out of it.
 function dueFrom(startInput, tz) {
   if (!startInput) return undefined;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(startInput)) return startInput + 'T00:00:00.000Z'; // date only (inbox)
-  const { start } = taskWindow(startInput, 30, tz);
-  return start.slice(0, 10) + 'T00:00:00.000Z';
+  return dueDate(startInput, tz) + 'T00:00:00.000Z';
 }
 
 // The stored HH:MM has to be the wall clock the person typed, which the raw input already
@@ -764,33 +762,36 @@ async function listTasks(uid) {
 
 app.get('/api/tasks', can('tasks:read', 'tasks:write'), wrap((req) => listTasks(req.user.id)));
 
-app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
-  const title = String(req.body?.title || '').trim();
+// Shared by POST /api/tasks and quick capture, so both write a task the same way. `body` is
+// the POST /api/tasks payload; the Google task is created first and a Linear failure is
+// reported as a warning rather than undoing it.
+async function createTask(user, body) {
+  const title = String(body?.title || '').trim();
   if (!title) throw fail(400, 'title required');
-  const notes = String(req.body?.notes || '');
-  const due = dueFrom(req.body?.start, req.user.timezone);
+  const notes = String(body?.notes || '');
+  const due = dueFrom(body?.start, user.timezone);
 
-  const created = await api(req.user.id, 'google', tasksUrl(), {
+  const created = await api(user.id, 'google', tasksUrl(), {
     method: 'POST',
     body: JSON.stringify({ title, notes, due, status: 'needsAction' }),
   });
 
   const meta = {
-    time: timeFrom(req.body?.start),
-    minutes: req.body?.minutes,
-    priority: req.body?.priority,
-    project: req.body?.project || null,
+    time: timeFrom(body?.start),
+    minutes: body?.minutes,
+    priority: body?.priority,
+    project: body?.project || null,
   };
 
   // The Google task already exists, so a Linear failure must not lose it: the issue is
   // best-effort and its error rides back with the created task.
   let warning = null;
   // Linking an existing issue (from the inbox) never files a new one.
-  const link = allows(req.user, 'projects:read') ? linearLink(req.body?.linearIssue) : null;
+  const link = allows(user, 'projects:read') ? linearLink(body?.linearIssue) : null;
   if (link) Object.assign(meta, link);
-  else if (req.body?.project) {
+  else if (body?.project) {
     try {
-      const issue = await linearIssueFor(req.user.id, String(req.body.project), { title, notes, due });
+      const issue = await linearIssueFor(user.id, String(body.project), { title, notes, due });
       Object.assign(meta, { linearId: issue.id, linearUrl: issue.url, linearKey: issue.identifier });
     } catch (e) {
       warning = `Task created, but Linear did not: ${e.message}`;
@@ -798,8 +799,43 @@ app.post('/api/tasks', can('tasks:write'), wrap(async (req) => {
   }
 
   const saved = await setMeta(created.id, meta);
-  bust(req.user.id);
+  bust(user.id);
   return { ...shapeTask(created, saved), warning };
+}
+app.post('/api/tasks', can('tasks:write'), wrap((req) => createTask(req.user, req.body)));
+
+/* --- quick capture: "mañana 3pm revisar PR !dash p1" --- */
+
+const QUICK_MAX = 300;
+
+// Linear projects are the only lookup; they are cached briefly so typing does not hit Linear
+// per keystroke. Without projects:read, or with Linear unreachable, the list is just empty.
+async function quickParse(user, text) {
+  const s = String(text ?? '');
+  if (s.length > QUICK_MAX) throw fail(400, `text is limited to ${QUICK_MAX} characters`);
+  // A failed load is cached too (15 s), so previews do not hammer Linear while it is down.
+  const loaded = allows(user, 'projects:read')
+    ? await memo(`projects:${user.id}`, 15_000, async () => {
+      try {
+        const d = await linear(user.id, 'query { projects(first: 100, includeArchived: false) { nodes { id name } } }');
+        return { projects: d.projects.nodes, failed: false };
+      } catch { return { projects: [], failed: true }; }
+    })
+    : { projects: [], failed: false };
+  return parseQuick(s, { now: new Date(), tz: user.timezone, projects: loaded.projects, projectsFailed: loaded.failed });
+}
+
+app.get('/api/quick/parse', can('tasks:write'), wrap((req) => quickParse(req.user, req.query.text)));
+
+// The server parses again on create, so what is stored never depends on the client's preview.
+app.post('/api/tasks/quick', can('tasks:write'), wrap(async (req) => {
+  const parsed = await quickParse(req.user, req.body?.text);
+  if (!parsed.title) throw fail(400, 'title required');
+  const task = await createTask(req.user, {
+    title: parsed.title, start: parsed.due, minutes: parsed.duration,
+    priority: parsed.priority, project: parsed.project?.id,
+  });
+  return { task, parsed };
 }));
 
 app.patch('/api/tasks/:id', can('tasks:write'), wrap(async (req) => {

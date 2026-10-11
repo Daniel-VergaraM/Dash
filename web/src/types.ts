@@ -208,3 +208,14 @@ export interface NotificationsPayload {
   unread: number;
   items: AppNotification[];
 }
+
+// Result of the quick-capture parser (GET /api/quick/parse).
+export interface QuickParsed {
+  title: string;
+  due: string | null; // YYYY-MM-DD or YYYY-MM-DDTHH:MM
+  hasTime: boolean;
+  priority: Priority | null;
+  project: { id: string; name: string } | null;
+  duration: number | null; // minutes
+  warnings: string[];
+}

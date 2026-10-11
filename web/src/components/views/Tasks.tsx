@@ -10,8 +10,8 @@ import ProjectsModal from '../ProjectsModal';
 const PRIORITIES: Priority[] = ['high', 'med', 'low'];
 const rank = (p: Priority | null) => (p ? PRIORITIES.indexOf(p) : PRIORITIES.length);
 
-export default function Tasks({ active, vimNav, focusReq }: {
-  active: boolean; vimNav: boolean; focusReq?: { id: string } | null;
+export default function Tasks({ active, vimNav, focusReq, refreshKey }: {
+  active: boolean; vimNav: boolean; focusReq?: { id: string } | null; refreshKey?: number;
 }) {
   const { can } = useAuth();
   const [tasks, setTasks] = useState<CalEvent[] | null>(null);
@@ -59,7 +59,7 @@ export default function Tasks({ active, vimNav, focusReq }: {
 
   useEffect(() => {
     if (active) { loadTasks(); loadProjects(); loadLegacy(); }
-  }, [active, loadTasks, loadProjects, loadLegacy]);
+  }, [active, refreshKey, loadTasks, loadProjects, loadLegacy]);
 
   // The palette asks for one task: widen the filters so it is listed, then focus its row.
   const handled = useRef<{ id: string } | null>(null);

@@ -14,7 +14,7 @@ function defaultWhen() {
   return d.toISOString().slice(0, 16);
 }
 
-export default function Today({ active, vimNav }: { active: boolean; vimNav: boolean }) {
+export default function Today({ active, vimNav, refreshKey }: { active: boolean; vimNav: boolean; refreshKey?: number }) {
   const { can } = useAuth();
   const [tasks, setTasks] = useState<CalEvent[] | null>(null);
   const [tasksErr, setTasksErr] = useState<ApiError | null>(null);
@@ -51,7 +51,7 @@ export default function Today({ active, vimNav }: { active: boolean; vimNav: boo
     if (can('tasks:read') || can('tasks:write')) loadTasks();
     if (can('calendar:read')) loadAgenda();
     if (can('music:read')) loadNow();
-  }, [active, can, loadTasks, loadAgenda, loadNow]);
+  }, [active, refreshKey, can, loadTasks, loadAgenda, loadNow]);
 
   async function addTask() {
     setAddErr('');
