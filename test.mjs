@@ -5,7 +5,7 @@ import path from 'node:path';
 import {
   noteName, macFromArp, taskWindow, startOfDay, searchSources, driveTerm, matches, snippet,
   prioToLinear, prioFromLinear, inboxScore, inboxOrder, issuePatch, linearLink,
-  notePath, parseNote, resolveLink, backlinksOf, rewriteLinks, filterNotes,
+  notePath, parseNote, countTasks, resolveLink, backlinksOf, rewriteLinks, filterNotes,
   localNow, dueDate, cleanNotify, dueReminders, digestDue, digestItem, parseQuick,
   sniffImage, badDims, stripJpegMeta, ASSET_NAME,
 } from './lib.js';
@@ -558,6 +558,38 @@ assert.deepEqual(parseNote('x\n```\n#in-block\n```\nand `#inline` and $a_#b$ and
 assert.deepEqual(parseNote('---\ntags: [A, "b c"]\n---\nbody #z').tags, ['a', 'b c', 'z']);
 assert.deepEqual(parseNote('---\ntags: one, Two\n---\n').tags, ['one', 'two']);
 assert.deepEqual(parseNote('---\ntitle: x\ntags:\n  - L1\n  - #l2\nother: 1\n---\n').tags, ['l1', 'l2']);
+// task lists: bullets, numbers, bare markers; code, tables, wiki links and md links do not count
+assert.deepEqual(countTasks('- [ ] a\n* [x] b\n+ [X] c\n1. [ ] d\n2) [x] e\n[ ] f\n  [x] g\n\t- [ ] h'), { open: 4, done: 4 });
+assert.deepEqual(countTasks('x [ ] mid\n[ ]nospace\n[[x]] y\n[x](http://u) y\n[x]\n- [ ]\n-[ ] a\n- [y] a'), { open: 0, done: 0 });
+assert.deepEqual(countTasks('```\n- [ ] code\n[x] code\n```\n~~~md\n- [x] tilde\n~~~\n- [ ] real'), { open: 1, done: 0 }, 'fenced code ignored');
+assert.deepEqual(countTasks('| [ ] | a |\n|--|--|\n| - [x] | b |'), { open: 0, done: 0 }, 'tables ignored');
+assert.deepEqual(countTasks('- [ ] a\r\n- [x] b\r\n```\r\n- [ ] c\r\n```\r\n'), { open: 1, done: 1 }, 'CRLF');
+assert.deepEqual(parseNote('- [ ] a\n- [x] b\n').tasks, { open: 1, done: 1 });
+// fences need <= 3 spaces of indent; $$ blocks and block-level HTML are not task lists
+assert.deepEqual(countTasks('    ```\n- [ ] a\n    ```\n- [x] b'), { open: 1, done: 1 }, '4-space fence is not a fence');
+assert.deepEqual(countTasks('   ```\n- [ ] a\n   ```\n- [x] b'), { open: 0, done: 1 }, '3-space fence is a fence');
+assert.deepEqual(countTasks('$$\n- [ ] a\n$$\n- [x] b'), { open: 0, done: 1 }, '$$ block ignored');
+assert.deepEqual(countTasks('<div>\n- [ ] a\n</div>\n- [x] b'), { open: 0, done: 1 }, 'html block ignored');
+assert.deepEqual(countTasks('<div>\n- [ ] a\n\n- [x] b'), { open: 0, done: 1 }, 'html block ends at a blank line');
+assert.deepEqual(countTasks('<b>x</b>\n- [ ] a'), { open: 1, done: 0 }, 'inline html is not a block');
+{
+  // web/src/lib/mdTask.ts is TypeScript: needs a Node that strips types (22.18+/23.6+).
+  const md = await import('./web/src/lib/mdTask.ts').catch(() => null);
+  if (md) {
+    const { convertToTask, countTasks: mdCount } = md;
+    const keep = '| a |\n|---|\n```\n# head\n~~~';
+    assert.equal(convertToTask(keep, 0, keep.length).text, keep, 'table / fence / heading untouched');
+    assert.equal(convertToTask('a\n# h\nb', 0, 7).text, '- [ ] a\n# h\n- [ ] b');
+    assert.equal(convertToTask('- [ ] a\n- [x] b', 0, 15).text, '- a\n- b', 'all tasks -> marker removed');
+    const big = Array.from({ length: 10000 }, (_, i) => 'line ' + i).join('\n');
+    const t0 = performance.now();
+    const r = convertToTask(big, 0, big.length);
+    assert.ok(performance.now() - t0 < 200, 'convertToTask is linear on 10k lines');
+    assert.equal(mdCount(r.text).open, 10000);
+    for (const t of ['- [ ] a\n    ```\n- [x] b', '$$\n[ ] a\n$$\n[x] b', '<div>\n- [x] a\n</div>\n1. [ ] z'])
+      assert.deepEqual(mdCount(t), countTasks(t), 'mdTask.countTasks mirrors lib.countTasks');
+  }
+}
 assert.deepEqual(parseNote('see [[Foo]], [[dir/Bar|alias]] and [[Foo#sec]] [[Baz.md]]').links, ['Foo', 'dir/Bar', 'Baz']);
 
 assert.deepEqual(parseNote('| a |\n|---|\n| [[x\\|alias]] [[y\\|b]] [[z#s\\|c]] |').links, ['x', 'y', 'z'], 'escaped alias pipe');
@@ -785,6 +817,11 @@ assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.'
     assert.deepEqual([got.name, got.tags, got.backlinks], ['a/b.md', ['t1'], ['c.md']]);
     const list = await (await call('GET', '/api/notes')).json();
     assert.deepEqual(list.map((n) => n.name).sort(), ['a/b.md', 'c.md']);
+    assert.ok(list.every((n) => !('tasks' in n)), 'no tasks field on notes without tasks');
+    assert.equal((await call('PUT', '/api/notes/todo.md', { body: '- [ ] a\n[x] b\n```\n- [ ] code\n```\n' })).status, 200);
+    const withTasks = (await (await call('GET', '/api/notes')).json()).find((n) => n.name === 'todo.md');
+    assert.deepEqual(withTasks.tasks, { open: 1, done: 1 });
+    assert.equal((await call('DELETE', '/api/notes/todo.md')).status, 200);
     assert.equal((await (await call('GET', '/api/notes?tag=t1')).json())[0].folder, 'a');
 
     const mv = await (await call('POST', '/api/notes/rename', { from: 'a/b.md', to: 'z/b2.md' })).json();

@@ -77,6 +77,8 @@ export interface NoteMeta {
   folder: string;
   modified: number;
   tags: string[];
+  // Present only when the note has checkbox tasks (`- [ ]` / `- [x]`).
+  tasks?: { open: number; done: number };
   // Only on searches (?q=): text around the first body hit.
   snippet?: string;
 }

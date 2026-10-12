@@ -190,6 +190,44 @@ function frontTags(front) {
   return out.map((t) => t.trim().replace(/^["']|["']$/g, '').replace(/^#/, ''));
 }
 
+// Task counts for the notes list: `- [ ] a`, `* [x]`, `1. [ ]`, `1) [X]` or a bare `[ ] a`
+// (text required, so `[x]`, `[ ]a`, `[[x]]` and `[x](url)` do not count). Fenced code (<= 3
+// spaces of indent), `$$` blocks and block-level HTML are skipped; table rows never start with
+// a marker. Mirror of web/src/lib/mdTask.ts (codeMask): keep in step.
+const TASK_BULLET = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[([ xX])\][ \t]+/;
+const TASK_BARE = /^[ \t]*\[([ xX])\][ \t]+\S/;
+const TASK_FENCE = /^ {0,3}(`{3,}|~{3,})([\s\S]*)$/;
+const TASK_MATH = /^[ \t]*\$\$[ \t]*$/;
+const TASK_HTML = /^ {0,3}<(div|details|summary|table|p|section|article|aside|nav|header|footer|main|figure|form|fieldset|ul|ol|dl|pre|blockquote|center|h[1-6])(\s[^>]*)?>([\s\S]*)$/i;
+export function countTasks(body) {
+  const out = { open: 0, done: 0 };
+  let mode = ''; // fence marker | '$$' | '</tag'
+  for (const raw of String(body ?? '').split('\n')) {
+    const l = raw.replace(/\r$/, '');
+    if (mode === '$$') { if (TASK_MATH.test(l)) mode = ''; continue; }
+    if (mode[0] === '<') {
+      if (!l.trim()) mode = '';
+      else if (l.toLowerCase().includes(mode)) { mode = ''; continue; }
+      else continue;
+    }
+    const f = TASK_FENCE.exec(l);
+    if (mode) {
+      if (f && f[1][0] === mode[0] && f[1].length >= mode.length && !f[2].trim()) mode = '';
+      continue;
+    }
+    if (f && !(f[1][0] === '`' && f[2].includes('`'))) { mode = f[1]; continue; }
+    if (TASK_MATH.test(l)) { mode = '$$'; continue; }
+    const h = TASK_HTML.exec(l);
+    if (h && !(h[2] || '').endsWith('/') && !h[3].toLowerCase().includes('</' + h[1].toLowerCase())) {
+      mode = '</' + h[1].toLowerCase();
+      continue;
+    }
+    const m = TASK_BULLET.exec(l) || TASK_BARE.exec(l);
+    if (m) m[1] === ' ' ? out.open++ : out.done++;
+  }
+  return out;
+}
+
 // Tags come from `#tag` in the prose (code and math removed first, so "# Title", "$x_#$" and
 // "`#!/bin`" do not count) plus the frontmatter; links are every [[target]].
 export function parseNote(body) {
@@ -204,6 +242,7 @@ export function parseNote(body) {
   return {
     tags: [...new Set([...tags].map((t) => t.toLowerCase().slice(0, 40)).filter(Boolean))],
     links: [...links],
+    tasks: countTasks(text),
   };
 }
 
@@ -285,6 +324,7 @@ export function filterNotes(entries, { q = '', tag = '', folder = '' } = {}, lim
       folder: dirOf(e.rel).slice(0, -1),
       modified: e.mtimeMs,
       tags: e.tags,
+      ...(e.tasks && e.tasks.open + e.tasks.done > 0 ? { tasks: e.tasks } : {}),
       ...(snip ? { snippet: snip } : {}),
     });
   }

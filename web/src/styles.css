@@ -270,3 +270,12 @@ nav button.bell { position: relative; }
   .notifpanel { top: 60px; left: 8px; right: 8px; width: auto; }
   nav .bellwrap { flex: none; }
 }
+/* Task lists in notes: real checkboxes in the preview, progress badge in the list. */
+#preview li.task-list-item { list-style: none; }
+#preview ul:has(> li.task-list-item), #preview ol:has(> li.task-list-item) { padding-left: 1.4em; }
+#preview li.task-list-item > input[type="checkbox"], #preview li.task-list-item > p > input[type="checkbox"] {
+  margin: 0 .5em 0 -1.4em; vertical-align: middle; accent-color: var(--accent); cursor: pointer; }
+#preview li.task-list-item > input:disabled { cursor: default; }
+#preview .taskdone { color: var(--dim); text-decoration: line-through; }
+#noteList .taskbadge { float: right; margin-left: 8px; padding: 0 6px; border: 1px solid var(--line);
+  border-radius: 999px; font-size: 11px; line-height: 1.6; color: var(--dim); }

@@ -1,7 +1,7 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Children, Fragment, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Image as ImageIcon, ImageOff, Table as TableIcon } from 'lucide-react';
+import { Image as ImageIcon, ImageOff, ListChecks, Table as TableIcon } from 'lucide-react';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { useAuth } from '../../context/AuthContext';
@@ -9,6 +9,7 @@ import { jf, encodePath } from '../../lib/api';
 import { useListNav } from '../../lib/useListNav';
 import { insertTable, tabInTable } from '../../lib/mdTable';
 import { insertImage, insertUploaded, isSafeImageUrl, IMG_TYPES, IMG_MAX } from '../../lib/mdImage';
+import { continueTask, convertToTask, normalizeBareTasks, parseTaskLine, toggleTaskAtCaret, toggleTaskAtLine } from '../../lib/mdTask';
 import type { NoteMeta, NoteDoc } from '../../types';
 
 const stem = (name: string) => name.replace(/\.md$/, '');
@@ -16,7 +17,7 @@ const stem = (name: string) => name.replace(/\.md$/, '');
 // [[x]] / [[x|alias]] / [[x#sec]] -> an internal link the `a` renderer below intercepts. The
 // replacement has no `|`, so it is safe inside a table cell; `[[x\|alias]]` (the escaped form
 // GFM needs when typed in a cell) is accepted too.
-const WIKI = /\[\[([^\]|#\\]+)(?:#[^\]|]*)?(?:\\?\|([^\]]+))?\]\]/g;
+const WIKI = /\[\[([^\]|#\\\n]+)(?:#[^\]|\n]*)?(?:\\?\|([^\]\n]+))?\]\]/g;
 // Fenced blocks and inline code are split out (odd indexes) and left untouched.
 const wikiToLinks = (md: string) => md.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, i) => i % 2 ? part
   : part.replace(WIKI, (_, t: string, alias?: string) =>
@@ -25,6 +26,31 @@ const wikiToLinks = (md: string) => md.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((
 // Only `src` goes through the image allow-list; links keep react-markdown's default filter.
 const urlTransform = (url: string, key: string) =>
   key === 'src' ? (isSafeImageUrl(url) ? url : '') : defaultUrlTransform(url);
+
+// The task a preview checkbox belongs to: its 1-based source line and text, set by the `li`
+// renderer and read by the checkbox inside it.
+const TaskCtx = createContext<{ line: number; text: string } | null>(null);
+
+// Accessible name: the task text without trivial markdown (emphasis, code, links), <= 80 chars.
+const taskLabel = (text?: string) => {
+  const s = (text ?? '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)|\[\[|\]\]/g, '$1')
+    .replace(/[*`~]+/g, '').replace(/(^|\s)_+|_+(?=\s|$)/g, '$1')
+    .replace(/\s+/g, ' ').trim();
+  return s ? 'Task: ' + (s.length > 80 ? s.slice(0, 79) + '…' : s) : 'Task';
+};
+
+function TaskBox({ type, checked, canWrite, onToggle }: { type?: string; checked?: boolean; canWrite: boolean; onToggle: (line: number, text: string) => void }) {
+  const t = useContext(TaskCtx);
+  if (type !== 'checkbox') return <input type={type} checked={checked} disabled readOnly />;
+  return (
+    <input
+      type="checkbox" checked={!!checked} disabled={!canWrite || !t} data-line={t?.line}
+      aria-label={taskLabel(t?.text)}
+      onChange={() => { if (t) onToggle(t.line, t.text); }}
+    />
+  );
+}
 
 // Image with an accessible fallback: a blocked or broken `src` shows the alt text (and URL)
 // in place, so the layout does not collapse. An empty alt marks the image as decorative.
@@ -223,6 +249,10 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
   const shown = searching ? notes : [...notes].sort((a, b) => a.folder.localeCompare(b.folder) || a.name.localeCompare(b.name));
 
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  // Source line of the checkbox just toggled in the preview: focus returns to it once the
+  // preview has re-rendered, so keyboard use is not thrown into the editor.
+  const refocus = useRef<number | null>(null);
+  const refocusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Selection to restore once a table edit has re-rendered the controlled textarea.
   const pendingSel = useRef<[number, number] | null>(null);
   // Escape arms a one-shot "let the next Tab leave the editor" so tables never trap the keyboard.
@@ -253,6 +283,30 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
     }
     setBody(r.text);
   };
+  // Preview checkbox -> flips `[ ]`/`[x]` on that line of the real text through the same path
+  // as typing (undo stack, autosave). Skipped when the line no longer holds that task, which
+  // happens only if the text changed within the preview's debounce.
+  const toggleTask = (line: number, text: string) => {
+    if (!canWrite || !current) return;
+    if (parseTaskLine(body.split('\n')[line - 1] ?? '')?.text !== text) return;
+    const next = toggleTaskAtLine(body, line);
+    if (next === body) return;
+    const el = editorRef.current;
+    refocus.current = line;
+    // Give up if the preview never catches up with the text (it would steal focus later).
+    clearTimeout(refocusTimer.current);
+    refocusTimer.current = setTimeout(() => { refocus.current = null; }, 1000);
+    applyEdit({ text: next, sel: [el?.selectionStart ?? 0, el?.selectionEnd ?? 0] });
+  };
+  // Declared before the focus effect so a note change clears the pending refocus first.
+  useEffect(() => { refocus.current = null; }, [current]);
+  useEffect(() => {
+    if (refocus.current === null || previewBody !== body) return;
+    document.querySelector<HTMLInputElement>(`#preview input[data-line="${refocus.current}"]`)?.focus();
+    refocus.current = null;
+    clearTimeout(refocusTimer.current);
+  }, [body, previewBody]);
+  const taskText = useMemo(() => previewBody.split('\n').map((l) => parseTaskLine(l)), [previewBody]);
   // Pasted / dropped images: uploaded raw, then the markdown for the stored copy is inserted.
   // The upload outlives the render that started it, so the latest body, note and applyEdit are
   // read through refs, and the insert is skipped if the person has moved to another note.
@@ -342,6 +396,11 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
                   className={n.name === current ? 'on' : ''} aria-current={n.name === current || undefined} onClick={() => openNote(n.name)}
                 >
                   {stem(searching || !n.folder ? n.name : n.name.slice(n.folder.length + 1))}
+                  {n.tasks && (
+                    <span className="taskbadge" role="img" aria-label={`${n.tasks.done} of ${n.tasks.open + n.tasks.done} tasks done`}>
+                      {n.tasks.done}/{n.tasks.open + n.tasks.done}
+                    </span>
+                  )}
                   {n.snippet && <span className="snippet">{n.snippet}</span>}
                 </button>
               </Fragment>
@@ -364,6 +423,15 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
           }}
           onFocus={() => { tabFree.current = false; }} onBlur={() => { tabFree.current = false; }}
           onKeyDown={(e) => {
+            // Enter continues / ends a task list; Ctrl/Cmd+Enter flips the task under the caret.
+            // Anything else (tables, plain text, a selection, IME composition) keeps default Enter.
+            if (e.key === 'Enter' && canWrite && current && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && !e.shiftKey && !e.altKey) {
+              tabFree.current = false;
+              const { selectionStart: a, selectionEnd: b } = e.currentTarget;
+              const r = e.ctrlKey || e.metaKey ? toggleTaskAtCaret(body, a, b) : continueTask(body, a, b);
+              if (r) { e.preventDefault(); applyEdit(r); }
+              return;
+            }
             if (e.key === 'Escape') tabFree.current = true;
             else if (e.key === 'Tab' && canWrite && current && !e.ctrlKey && !e.altKey && !e.metaKey) {
               if (tabFree.current) tabFree.current = false;
@@ -389,10 +457,27 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
                   ? <a href={href} onClick={(e) => { e.preventDefault(); let t = href.slice(6); try { t = decodeURIComponent(t); } catch { /* keep raw */ } openLink(t); }}>{children}</a>
                   : <a href={href} target="_blank" rel="noreferrer">{children}</a>,
                 img: ({ src, alt, title }) => <NoteImg src={src} alt={alt} title={title} />,
+                li: ({ node, className, children }) => {
+                  if (!className?.includes('task-list-item')) return <li className={className}>{children}</li>;
+                  const line = node?.position?.start.line ?? 0;
+                  const t = taskText[line - 1];
+                  // Done: dim and strike only the item's own text, not the sub-list under it.
+                  const kids = Children.toArray(children);
+                  const at = kids.findIndex((c) => isValidElement(c) && (c.type === 'ul' || c.type === 'ol'));
+                  const own = at < 0 ? kids : kids.slice(0, at);
+                  return (
+                    <li className={className}>
+                      <TaskCtx.Provider value={t ? { line, text: t.text } : null}>
+                        {t?.done ? <><span className="taskdone">{own}</span>{at < 0 ? null : kids.slice(at)}</> : children}
+                      </TaskCtx.Provider>
+                    </li>
+                  );
+                },
+                input: ({ type, checked }) => <TaskBox type={type} checked={checked} canWrite={canWrite} onToggle={toggleTask} />,
                 table: ({ children }) => <div className="tablewrap"><table>{children}</table></div>,
               }}
             >
-              {wikiToLinks(previewBody)}
+              {normalizeBareTasks(wikiToLinks(previewBody))}
             </ReactMarkdown>
           </div>
           <div id="backlinks" role="region" aria-label="Backlinks">
@@ -428,6 +513,16 @@ export default function Notes({ active, vimNav, openName }: { active: boolean; v
             el.focus();
           }}
         ><ImageIcon size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Image</button>
+        <button
+          disabled={!current || !canWrite}
+          title={canWrite ? 'Turn the current line (or every selected line) into a task: - [ ] text. On tasks it removes the checkbox. Enter continues a task list; Ctrl/Cmd+Enter ticks the task under the caret.' : 'Requires notes:write'}
+          onClick={() => {
+            const el = editorRef.current;
+            if (!el) return;
+            applyEdit(convertToTask(body, el.selectionStart, el.selectionEnd));
+            el.focus();
+          }}
+        ><ListChecks size={14} aria-hidden style={{ verticalAlign: '-2px' }} /> Task</button>
         <button
           onClick={cleanImages} disabled={!canWrite}
           title={canWrite ? 'Delete uploaded images that no note links to, to free image storage' : 'Requires notes:write'}
