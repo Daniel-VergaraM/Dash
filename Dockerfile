@@ -1,5 +1,5 @@
 # ---- frontend build: compiles web/ (React/TS) to ../public via Vite ----
-FROM node:22-alpine AS webbuild
+FROM node:22.23.4-alpine AS webbuild
 WORKDIR /app/web
 RUN corepack enable
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -8,7 +8,7 @@ COPY web/ ./
 RUN pnpm run build
 
 # ---- runtime ----
-FROM node:22-alpine
+FROM node:22.23.4-alpine
 
 WORKDIR /app
 
