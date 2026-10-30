@@ -16,7 +16,7 @@ export default function UserFormModal({
   access, editing, meId, onSave, onDelete, onCancel,
 }: {
   access: AccessData;
-  editing: AccessUser | null;
+  editing: AccessUser;
   meId: string;
   onSave: (body: UserFormValues) => Promise<void> | void;
   onDelete: () => void;
@@ -53,15 +53,13 @@ export default function UserFormModal({
   }, []);
 
   useEffect(() => {
-    setName(editing?.name || '');
-    const initialRole = editing?.permissions ? 'custom' : (editing?.role || 'guest');
-    setRole(initialRole);
+    setName(editing.name);
+    setRole(editing.permissions ? 'custom' : editing.role);
     setPass('');
-    setMacs((editing?.macs || []).join(', '));
-    setDisabled(!!editing?.disabled);
+    setMacs(editing.macs.join(', '));
+    setDisabled(editing.disabled);
     setErr('');
-    const held = new Set(editing?.permissions || access.roles[editing?.role || 'guest'] || []);
-    setCaps(held);
+    setCaps(new Set(editing.permissions || access.roles[editing.role] || []));
   }, [editing, access.roles]);
 
   function onRoleChange(next: Role | 'custom') {
@@ -107,7 +105,7 @@ export default function UserFormModal({
         id="userForm" ref={formRef} onSubmit={submit}
         role="dialog" aria-modal="true" aria-labelledby="userFormTitle"
       >
-        <h3 id="userFormTitle">{editing ? 'Edit ' + editing.name : 'Add person'}</h3>
+        <h3 id="userFormTitle">Edit {editing.name}</h3>
         <label>Name<input maxLength={40} required value={name} onChange={(e) => setName(e.target.value)} autoFocus /></label>
         <label>Role
           <select value={role} onChange={(e) => onRoleChange(e.target.value as Role | 'custom')}>
@@ -118,7 +116,7 @@ export default function UserFormModal({
           </select>
         </label>
         <label>Password <span className="muted small">
-          {editing ? (editing.hasPassword ? '— leave blank to keep the current one' : '— none set') : ''}
+          {editing.hasPassword ? '— leave blank to keep the current one' : '— none set'}
         </span>
           <input type="password" placeholder="at least 10 characters" autoComplete="new-password"
             value={pass} onChange={(e) => setPass(e.target.value)} />
@@ -147,7 +145,7 @@ export default function UserFormModal({
         <div className="row" style={{ marginTop: 14 }}>
           <button type="submit" className="primary">Save</button>
           <button type="button" onClick={onCancel}>Cancel</button>
-          {editing && editing.id !== meId && (
+          {editing.id !== meId && (
             <button type="button" className="danger" style={{ marginLeft: 'auto' }} onClick={onDelete}>Delete</button>
           )}
         </div>

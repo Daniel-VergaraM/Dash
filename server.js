@@ -14,10 +14,11 @@ import {
   IMG_MAX_BYTES, IMG_MIME, ASSET_NAME, sniffImage, badDims, stripJpegMeta,
 } from './lib.js';
 import {
-  CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser, createUser,
+  CAPABILITIES, ROLES, PASSWORD_MIN, initAuth, capsOf, allows, listUsers, getUser,
   updateUser, deleteUser, signIn, userByMac, startSession, sessionUser, endSession, sessionsOf,
   audit, readAudit, lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
+  createInvite, listInvites, revokeInvite, getInviteByToken, acceptInvite,
 } from './auth.js';
 import { initTaskMeta, subtasksOf, setSubtasks, metaOf, setMeta, deleteMeta } from './task-meta.js';
 import {
@@ -428,8 +429,13 @@ app.post('/api/logout', wrap(async (req, res) => {
 
 /* ---------- the gate: authentication, then authorisation per route ---------- */
 
+// Public invite routes: looking up an invite by token, and accepting it, happen before the
+// invitee has any session at all — everything else under /api and /auth still needs one.
+const PUBLIC_INVITE_RE = /^\/api\/invites\/[^/]+\/(info|accept)$/;
+
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api') && !req.path.startsWith('/auth')) return next();
+  if (PUBLIC_INVITE_RE.test(req.path)) return next();
   const found = sessionUser(sidOf(req));
   if (!found) return res.status(401).json({ error: 'not authenticated' });
   req.user = found.user;
@@ -537,10 +543,44 @@ app.get('/api/access/device', can('users:manage'), wrap(async (req) => {
   return { ip, mac, local: mac === LOCAL_MAC };
 }));
 
-app.post('/api/access/users', can('users:manage'), wrap(async (req) => {
-  const u = await createUser(req.body || {});
-  await audit('user-created', { by: req.user.name, userId: u.id, name: u.name, role: u.role });
-  return listUsers().find((x) => x.id === u.id);
+/* ---------- invites: self-service alternative to an admin creating a user directly ---------- */
+// Creating/listing/revoking an invite needs a session but no capability — anyone can invite,
+// bounded by the no-escalation rule inside createInvite itself. Looking up and accepting an
+// invite is public (see PUBLIC_INVITE_RE above): the invitee has no session yet.
+
+app.post('/api/invites', wrap(async (req) => {
+  const invite = await createInvite({
+    by: req.user, role: req.body?.role, permissions: req.body?.permissions,
+  });
+  await audit('invite-created', { by: req.user.name, inviteId: invite.id, role: invite.role });
+  return {
+    id: invite.id, role: invite.role, permissions: invite.permissions, expiresAt: invite.expiresAt,
+    link: `${BASE_URL}/invite/${invite.token}`,
+  };
+}));
+
+app.get('/api/invites', wrap(async (req) => ({
+  invites: listInvites(req.user).map(({ token, ...safe }) => safe),
+})));
+
+app.delete('/api/invites/:id', wrap(async (req) => {
+  await revokeInvite(req.params.id, req.user);
+  await audit('invite-revoked', { by: req.user.name, inviteId: req.params.id });
+  return { ok: true };
+}));
+
+app.get('/api/invites/:token/info', wrap(async (req) => {
+  const invite = getInviteByToken(req.params.token);
+  if (!invite) throw fail(404, 'invite not found');
+  return {
+    role: invite.role, permissions: invite.permissions,
+    invitedByName: invite.createdByName, expiresAt: invite.expiresAt,
+  };
+}));
+
+app.post('/api/invites/:token/accept', wrap(async (req) => {
+  const user = await acceptInvite(req.params.token, req.body || {});
+  return { ok: true, name: user.name };
 }));
 
 app.patch('/api/access/users/:id', can('users:manage'), wrap(async (req) => {
@@ -1740,6 +1780,10 @@ async function tick() {
     ticking = false;
   }
 }
+
+// Same SPA shell as every other page (express.static below serves it at '/' via its default
+// index.html) — the invite token itself is read client-side, not needed here.
+app.get('/invite/:token', (req, res) => res.sendFile(path.join(DIR, 'public', 'index.html')));
 
 app.use(express.static(path.join(DIR, 'public')));
 

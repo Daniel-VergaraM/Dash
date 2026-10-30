@@ -45,8 +45,10 @@ export const ROLES = {
 // An explicit permissions array overrides the role; otherwise the role's defaults apply.
 export function capsOf(user) {
   if (!user || user.disabled) return [];
-  const caps = Array.isArray(user.permissions) ? user.permissions : ROLES[user.role];
-  return (caps || []).filter((c) => c in CAPABILITIES);
+  const caps = Array.isArray(user.permissions)
+    ? user.permissions
+    : (Object.hasOwn(ROLES, user.role) ? ROLES[user.role] : []);
+  return (caps || []).filter((c) => Object.hasOwn(CAPABILITIES, c));
 }
 
 export const allows = (user, ...anyOf) => {
@@ -83,7 +85,7 @@ export const cleanTimezone = (raw) => (typeof raw === 'string' && TIMEZONES.has(
 export function cleanPermissions(raw) {
   if (raw === null || raw === undefined) return null; // null = inherit from role
   if (!Array.isArray(raw)) return null;
-  return [...new Set(raw.filter((c) => c in CAPABILITIES))];
+  return [...new Set(raw.filter((c) => Object.hasOwn(CAPABILITIES, c)))];
 }
 
 /* ---------- password hashing ---------- */
@@ -108,17 +110,19 @@ export async function verifyPassword(password, stored) {
 /* ---------- store ---------- */
 
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const INVITE_MS = 72 * 60 * 60 * 1000;
 let dir = null;
-let db = { users: [], sessions: {} };
+let db = { users: [], sessions: {}, invites: [] };
 
 const file = (n) => path.join(dir, n);
 const save = () => fs.writeFile(file('auth.json'), JSON.stringify(db, null, 2));
 
 export async function initAuth(dataDir, bootstrapPassword) {
   dir = dataDir;
-  db = JSON.parse(await fs.readFile(file('auth.json'), 'utf8').catch(() => 'null')) || { users: [], sessions: {} };
+  db = JSON.parse(await fs.readFile(file('auth.json'), 'utf8').catch(() => 'null')) || { users: [], sessions: {}, invites: [] };
   db.users ||= [];
   db.sessions ||= {};
+  db.invites ||= [];
 
   // Records written before the switch from 6-digit codes stored the hash under `codeHash`.
   // scrypt does not care what the input was, so the old credential keeps working.
@@ -148,6 +152,7 @@ export async function initAuth(dataDir, bootstrapPassword) {
 function sweep() {
   const now = Date.now();
   for (const [sid, s] of Object.entries(db.sessions)) if (s.expiresAt < now) delete db.sessions[sid];
+  db.invites = db.invites.filter((i) => i.usedAt || i.expiresAt >= now);
 }
 
 export const listUsers = () =>
@@ -169,7 +174,7 @@ export async function createUser({ name, role = 'guest', password, macs = [], pe
   const clean = cleanName(name);
   if (!clean) throw Object.assign(new Error('name must be 2-40 characters'), { status: 400 });
   if (userByName(clean)) throw Object.assign(new Error('someone already has that name'), { status: 400 });
-  if (!ROLES[role]) throw Object.assign(new Error('unknown role'), { status: 400 });
+  if (!Object.hasOwn(ROLES, role)) throw Object.assign(new Error('unknown role'), { status: 400 });
   const user = {
     id: 'u_' + crypto.randomBytes(6).toString('hex'),
     name: clean,
@@ -207,7 +212,7 @@ export async function updateUser(id, patch) {
     next.name = clean;
   }
   if (patch.role !== undefined) {
-    if (!ROLES[patch.role]) throw Object.assign(new Error('unknown role'), { status: 400 });
+    if (!Object.hasOwn(ROLES, patch.role)) throw Object.assign(new Error('unknown role'), { status: 400 });
     next.role = patch.role;
   }
   if (patch.permissions !== undefined) next.permissions = cleanPermissions(patch.permissions);
@@ -241,6 +246,83 @@ export async function deleteUser(id) {
   }
   dropSessionsFor(id);
   await save();
+}
+
+/* ---------- invites ---------- */
+//
+// Self-service alternative to an admin creating a user directly: an admin (or anyone with
+// users:manage) mints a single-use link for a role/permission set no wider than their own,
+// and the invitee sets their own name and password when they accept it.
+
+export async function createInvite({ by, role = 'guest', permissions = null, expiresInMs = INVITE_MS }) {
+  if (!Object.hasOwn(ROLES, role)) throw Object.assign(new Error('invalid role'), { status: 400 });
+  const clean = cleanPermissions(permissions);
+
+  // No-escalation rule: an invite can never grant a capability the inviter doesn't have.
+  const granted = capsOf({ role, permissions: clean, disabled: false });
+  const grantorCaps = capsOf(by);
+  if (!granted.every((c) => grantorCaps.includes(c))) {
+    throw Object.assign(new Error('cannot grant a role or permissions beyond your own'), { status: 400 });
+  }
+
+  const invite = {
+    id: 'inv_' + crypto.randomBytes(6).toString('hex'),
+    token: 'it_' + crypto.randomBytes(24).toString('hex'), // ponytail: same entropy as session ids, no uniqueness loop needed
+    role,
+    permissions: clean,
+    createdBy: by.id,
+    createdByName: by.name,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + expiresInMs,
+    usedAt: null,
+    usedByUserId: null,
+    revokedAt: null,
+  };
+  db.invites.push(invite);
+  await save();
+  return invite;
+}
+
+export const listInvites = (user) =>
+  allows(user, 'users:manage') ? db.invites : db.invites.filter((i) => i.createdBy === user.id);
+
+export async function revokeInvite(id, user) {
+  const invite = db.invites.find((i) => i.id === id);
+  if (!invite) throw Object.assign(new Error('no such invite'), { status: 404 });
+  if (invite.createdBy !== user.id && !allows(user, 'users:manage')) {
+    throw Object.assign(new Error('not your invite'), { status: 403 });
+  }
+  // Idempotent: revoking something already used or revoked is a no-op, not an error.
+  if (invite.revokedAt || invite.usedAt) return invite;
+  invite.revokedAt = Date.now();
+  await save();
+  return invite;
+}
+
+// Returns the invite only if it is still usable, and null for every other reason (missing,
+// expired, used, revoked) — distinguishing those would leak state to an unauthenticated caller.
+export function getInviteByToken(token) {
+  const invite = db.invites.find((i) => i.token === token);
+  if (!invite || invite.revokedAt || invite.usedAt || invite.expiresAt <= Date.now()) return null;
+  return invite;
+}
+
+export async function acceptInvite(token, { name, password }) {
+  const invite = getInviteByToken(token);
+  if (!invite) throw Object.assign(new Error('invalid or expired invite'), { status: 404 });
+  // Marked synchronously (no await since the lookup above) so a second concurrent accept of the
+  // same token already sees usedAt set — closes the double-accept window; still racy across
+  // multiple server processes sharing this file, same limitation as the rest of this store.
+  invite.usedAt = Date.now();
+  try {
+    const user = await createUser({ name, password, role: invite.role, permissions: invite.permissions });
+    invite.usedByUserId = user.id;
+    await save();
+    return user;
+  } catch (err) {
+    invite.usedAt = null; // revert: a retryable failure (weak password, duplicate name) shouldn't burn the invite
+    throw err;
+  }
 }
 
 /* ---------- sign-in ---------- */

@@ -19,6 +19,7 @@ import {
   deleteUser, signIn, userByMac, userByName, getUser, startSession, sessionUser, endSession,
   listUsers, lockedFor, recordFailure, clearFailures,
   addPasskey, removePasskey, passkeysOf, userByPasskey, touchPasskey,
+  createInvite, listInvites, revokeInvite, getInviteByToken, acceptInvite,
 } from './auth.js';
 import { initTaskMeta, subtasksOf, setSubtasks, deleteSubtasksFor } from './task-meta.js';
 
@@ -453,6 +454,67 @@ await initAuth(dir, OWNER_PW);
 assert.equal(listUsers().length, 1, 'a second init must not create another bootstrap admin');
 assert.equal((await signIn('Owner', NEW_PW)).id, owner.id);
 
+/* ---------- invites ---------- */
+
+// No role given falls back to the lowest tier.
+const defaultInvite = await createInvite({ by: owner });
+assert.equal(defaultInvite.role, 'guest');
+
+// No-escalation rule: a non-privileged inviter cannot grant more than their own caps.
+const member = await createUser({ name: 'Member', role: 'member', password: 'member passphrase one' });
+await assert.rejects(() => createInvite({ by: member, role: 'admin' }), (err) => err.status === 400);
+await assert.rejects(
+  () => createInvite({ by: member, role: 'guest', permissions: ['users:manage'] }),
+  (err) => err.status === 400,
+);
+
+// Accepting reuses createUser's own validation — a weak password is rejected exactly like a
+// direct createUser call, and the failed attempt must not burn the invite.
+const weakInvite = await createInvite({ by: owner, role: 'guest' });
+await assert.rejects(() => acceptInvite(weakInvite.token, { name: 'Weakling', password: 'short' }), /at least 10/);
+assert.ok(getInviteByToken(weakInvite.token), 'a failed accept must not burn the invite');
+
+const invited = await acceptInvite(weakInvite.token, { name: 'Invitee', password: 'invitee passphrase one' });
+assert.equal(invited.role, 'guest');
+assert.equal((await signIn('Invitee', 'invitee passphrase one')).id, invited.id);
+
+// Once accepted, the token can never be reused.
+assert.equal(getInviteByToken(weakInvite.token), null, 'a used invite is no longer usable');
+await assert.rejects(
+  () => acceptInvite(weakInvite.token, { name: 'Someone Else', password: 'another passphrase one' }),
+  (err) => err.status === 404,
+);
+
+// Revoking: only the creator, or someone holding users:manage, may revoke.
+const otherGuest = await createUser({ name: 'Other Guest', role: 'guest', password: 'other guest passphrase' });
+const memberInvite = await createInvite({ by: member });
+await assert.rejects(() => revokeInvite(memberInvite.id, otherGuest), (err) => err.status === 403);
+await revokeInvite(memberInvite.id, member); // the creator may revoke their own
+assert.equal(getInviteByToken(memberInvite.token), null);
+await assert.rejects(() => revokeInvite('inv_nonexistent', owner), (err) => err.status === 404);
+
+const adminRevokable = await createInvite({ by: member, role: 'guest' });
+await revokeInvite(adminRevokable.id, owner); // users:manage may revoke anyone's invite
+assert.equal(getInviteByToken(adminRevokable.token), null);
+await revokeInvite(adminRevokable.id, owner); // idempotent: already revoked is a no-op, not an error
+
+// Expired invites behave exactly as if they never existed — no distinct error for "expired".
+const expired = await createInvite({ by: owner, expiresInMs: -1000 });
+assert.equal(getInviteByToken(expired.token), null, 'an expired invite is not returned');
+await assert.rejects(
+  () => acceptInvite(expired.token, { name: 'Too Late', password: 'too late passphrase one' }),
+  (err) => err.status === 404,
+);
+
+// listInvites: users:manage sees everything; anyone else sees only their own.
+await createInvite({ by: member });
+assert.ok(listInvites(member).length > 0 && listInvites(member).every((i) => i.createdBy === member.id));
+assert.ok(listInvites(owner).length >= listInvites(member).length, 'users:manage sees every invite');
+
+await deleteUser(member.id);
+await deleteUser(otherGuest.id);
+await deleteUser(invited.id);
+
 await fs.rm(dir, { recursive: true, force: true });
 
 /* ---------- migration from the old 6-digit codes ---------- */
@@ -857,10 +919,47 @@ assert.equal(digestItem({ tz: 'UTC', now: R0 }).body, 'Nothing scheduled today.'
         assert.equal(r.status, 200);
         return r.headers.get('set-cookie').split(';')[0];
       };
-      assert.equal((await call('POST', '/api/access/users', { name: 'Writer', role: 'member', password: 'writer-pass-123' })).status, 200);
-      assert.equal((await call('POST', '/api/access/users', { name: 'Reader', role: 'guest', password: 'reader-pass-123' })).status, 200);
+      // Users are now onboarded via invite links, not a direct admin create-user call.
+      const invite = async (role) => {
+        const r = await call('POST', '/api/invites', { role });
+        assert.equal(r.status, 200);
+        const j = await r.json();
+        assert.equal(j.role, role);
+        assert.equal('token' in j, false, 'the raw token never appears outside the embedded link');
+        return new URL(j.link).pathname.split('/').pop();
+      };
+      const acceptInvitePublic = (token, body) => fetch(`${base}/api/invites/${token}/accept`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const writerToken = await invite('member');
+      const readerToken = await invite('guest');
+      const acceptedWriter = await acceptInvitePublic(writerToken, { name: 'Writer', password: 'writer-pass-123' });
+      assert.equal(acceptedWriter.status, 200);
+      assert.equal((await acceptedWriter.json()).name, 'Writer');
+      assert.equal((await acceptInvitePublic(readerToken, { name: 'Reader', password: 'reader-pass-123' })).status, 200);
       const writer = await login2('Writer', 'writer-pass-123');
       const reader = await login2('Reader', 'reader-pass-123');
+
+      // A non-admin cannot invite above their own role.
+      assert.equal((await fetch(`${base}/api/invites`, {
+        method: 'POST', headers: { cookie: writer, 'content-type': 'application/json' }, body: JSON.stringify({ role: 'admin' }),
+      })).status, 400, 'a member cannot invite an admin');
+
+      // The gate exempts only the two public invite routes, even with no session at all.
+      assert.equal((await fetch(`${base}/api/invites/token-inventado-que-no-existe/info`)).status, 404,
+        'an unknown token is a plain 404, not a 401 — the route itself needs no session');
+      const bogusAccept = await fetch(`${base}/api/invites/token-inventado/accept`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'X', password: 'xxxxxxxxxx' }),
+      });
+      assert.notEqual(bogusAccept.status, 401, 'accept must never demand a session');
+      assert.equal(bogusAccept.status, 404, 'an unknown token is just an invalid invite');
+
+      // The old direct create-user route is gone; any unauthenticated /api call is still a
+      // plain 401 from the gate, which runs before Express even looks for a matching route.
+      assert.equal((await fetch(`${base}/api/access/users`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Nope', role: 'guest', password: 'xxxxxxxxxx' }),
+      })).status, 401, 'removed route, but the session gate still runs first');
 
       assert.equal((await up(null, PNG)).status, 401);
       assert.equal((await fetch(`${base}/notes/assets/${'a'.repeat(32)}.png`)).status, 401);

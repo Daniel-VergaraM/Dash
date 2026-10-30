@@ -20,7 +20,7 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
   const { me } = useAuth();
   const [access, setAccess] = useState<AccessData>(EMPTY);
   const [device, setDevice] = useState<{ ip: string; mac: string; local: boolean } | null>(null);
-  const [editing, setEditing] = useState<AccessUser | null | undefined>(undefined); // undefined = modal closed
+  const [editing, setEditing] = useState<AccessUser | undefined>(undefined); // undefined = modal closed
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loaded, setLoaded] = useState(false);
   const [err, setErr] = useState('');
@@ -37,8 +37,8 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
   useEffect(() => { if (active) load(); }, [active, load]);
 
   async function save(body: UserFormValues) {
-    if (editing) await jf('/api/access/users/' + editing.id, { method: 'PATCH', body: JSON.stringify(body) });
-    else await jf('/api/access/users', { method: 'POST', body: JSON.stringify(body) });
+    if (!editing) return;
+    await jf('/api/access/users/' + editing.id, { method: 'PATCH', body: JSON.stringify(body) });
     setEditing(undefined);
     load();
   }
@@ -124,7 +124,9 @@ export default function Access({ active, vimNav }: { active: boolean; vimNav: bo
             <button onClick={() => setSelected(new Set())}>Clear selection</button>
           </div>
         )}
-        <button className="primary" style={{ marginTop: 12 }} onClick={() => setEditing(null)}>+ Add person</button>
+        <p className="muted small" style={{ marginTop: 12 }}>
+          To add new people, generate an invitation from your Account view.
+        </p>
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>

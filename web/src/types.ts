@@ -149,6 +149,13 @@ export interface Passkey {
   lastUsed: number | null;
 }
 
+export interface InvitePublic {
+  role: Role;
+  permissions: Capability[] | null;
+  invitedByName: string;
+  expiresAt: number;
+}
+
 export interface AccessUser {
   id: string;
   name: string;
@@ -179,6 +186,17 @@ export interface AccessData {
   roles: Record<Role, Capability[]>;
   users: AccessUser[];
   audit: AuditEntry[];
+}
+
+export interface Invite {
+  id: string;
+  role: Role;
+  permissions: Capability[] | null;
+  createdByName: string;
+  createdAt: number;
+  expiresAt: number;
+  usedAt: number | null;
+  revokedAt: number | null;
 }
 
 export type ViewName =

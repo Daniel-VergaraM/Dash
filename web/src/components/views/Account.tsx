@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 import { jf, ago } from '../../lib/api';
 import { b64uToBuf, credToJSON, hasWebAuthn } from '../../lib/webauthn';
 import { useAuth } from '../../context/AuthContext';
-import type { Passkey, NotifySettings, NotificationsPayload } from '../../types';
+import type { Passkey, NotifySettings, NotificationsPayload, Role, Invite } from '../../types';
 
 const TIMEZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -90,6 +90,41 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
     catch (e) { setPkMsg({ text: (e as Error).message }); }
   }
 
+  const [inviteRole, setInviteRole] = useState<Role>('guest');
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteMsg, setInviteMsg] = useState<{ text: string; ok?: boolean } | null>(null);
+  const [invites, setInvites] = useState<Invite[]>([]);
+
+  const loadInvites = useCallback(async () => {
+    try { setInvites((await jf<{ invites: Invite[] }>('/api/invites')).invites); }
+    catch (e) { setInviteMsg({ text: (e as Error).message }); }
+  }, []);
+  useEffect(() => { if (active) loadInvites(); }, [active, loadInvites]);
+
+  async function generateInvite() {
+    setInviteMsg(null);
+    setInviteLink(null);
+    try {
+      const inv = await jf<{ link: string }>('/api/invites', {
+        method: 'POST', body: JSON.stringify({ role: inviteRole, permissions: null }),
+      });
+      setInviteLink(inv.link);
+      loadInvites();
+    } catch (e) { setInviteMsg({ text: (e as Error).message }); }
+  }
+
+  async function copyInviteLink() {
+    if (!inviteLink) return;
+    try { await navigator.clipboard.writeText(inviteLink); setInviteMsg({ text: 'Link copied.', ok: true }); }
+    catch { setInviteMsg({ text: 'Could not copy the link.' }); }
+  }
+
+  async function revokeInvite(id: string) {
+    if (!confirm('Revoke this invitation?')) return;
+    try { await jf('/api/invites/' + id, { method: 'DELETE' }); loadInvites(); }
+    catch (e) { setInviteMsg({ text: (e as Error).message }); }
+  }
+
   async function addKey() {
     setPkMsg(null);
     try {
@@ -154,6 +189,55 @@ export default function Account({ active, kbdMode, onKbdModeChange, vimNav, onVi
             ? <button className="primary" style={{ marginTop: 12 }} onClick={addKey}>+ Add a passkey</button>
             : <span className="muted">This browser does not support passkeys.</span>}
           {pkMsg && <div className="small" role={pkMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: pkMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{pkMsg.text}</div>}
+        </div>
+
+        <div className="card">
+          <h3>Invite someone</h3>
+          <p className="muted small" style={{ marginTop: -6 }}>
+            Generate a one-time link so a new person can set up their own account.
+          </p>
+          <select
+            aria-label="Invite role" value={inviteRole}
+            onChange={(e) => setInviteRole(e.target.value as Role)}
+            style={{ width: '100%', marginBottom: 8 }}
+          >
+            <option value="guest">Guest — read-only</option>
+            <option value="member">Member — everything except the Access panel</option>
+            <option value="admin">Admin — everything, including the Access panel</option>
+          </select>
+          <button className="primary" onClick={generateInvite}>Generate link</button>
+          {inviteLink && (
+            <div style={{ marginTop: 10 }}>
+              <div className="row">
+                <input readOnly value={inviteLink} style={{ flex: 1 }} onFocus={(e) => e.target.select()} />
+                <button onClick={copyInviteLink}>Copy</button>
+              </div>
+              <p className="muted small" style={{ marginTop: 6 }}>This link is shown only once — copy it now.</p>
+            </div>
+          )}
+          {inviteMsg && <div className="small" role={inviteMsg.ok ? 'status' : 'alert'} style={{ marginTop: 8, color: inviteMsg.ok ? 'var(--good)' : 'var(--bad)' }}>{inviteMsg.text}</div>}
+          {invites.length > 0 && (
+            <ul className="list" style={{ marginTop: 12 }}>
+              {invites.map((inv) => {
+                const status = inv.revokedAt ? 'revoked' : inv.usedAt ? 'used' : 'pending';
+                return (
+                  <li key={inv.id}>
+                    <span className="grow">
+                      <b>{inv.role}</b> <span className="muted small">by {inv.createdByName} · {ago(inv.createdAt)}</span>
+                      <div className="muted small">
+                        {status === 'pending' && 'awaiting use'}
+                        {status === 'used' && 'used ' + ago(inv.usedAt as number)}
+                        {status === 'revoked' && 'revoked ' + ago(inv.revokedAt as number)}
+                      </div>
+                    </span>
+                    {status === 'pending' && (
+                      <button aria-label={`Revoke invite for ${inv.role}`} onClick={() => revokeInvite(inv.id)}>Revoke</button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
         <div className="card">
