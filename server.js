@@ -40,6 +40,11 @@ const assetDir = (userId) => path.join(DATA, 'assets', userId);
 const TOKEN_FILE = path.join(DATA, 'tokens.json');
 const PORT = Number(process.env.PORT ?? 3000); // PORT=0 -> ephemeral
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+// Caddy fronts two domains for this one container and preserves the real Host header, so the
+// request itself — not a fixed env var — is the only thing that knows which one a visitor used.
+// BASE_URL stays only as a boot-log value and a fallback for the rare spot with no `req` (e.g.
+// a token refresh that isn't triggered by an incoming request).
+const originOf = (req) => `${req.protocol}://${req.headers.host}`;
 
 await fs.mkdir(NOTES, { recursive: true });
 await initAuth(DATA, process.env.ACCESS_PASSWORD);
@@ -150,9 +155,11 @@ const PROVIDERS = {
   },
 };
 
-const redirectUri = (name) => `${BASE_URL}/auth/${name}/callback`;
+// req is undefined for the refresh-token exchange below (no incoming request drives it) —
+// redirect_uri isn't actually checked by providers on that grant type, so BASE_URL is fine there.
+const redirectUri = (req, name) => `${req ? originOf(req) : BASE_URL}/auth/${name}/callback`;
 
-async function exchange(userId, name, body) {
+async function exchange(userId, name, body, req) {
   const p = PROVIDERS[name];
   const res = await fetch(p.tokenUrl, {
     method: 'POST',
@@ -163,7 +170,7 @@ async function exchange(userId, name, body) {
     body: new URLSearchParams({
       client_id: process.env[p.id] || '',
       client_secret: process.env[p.secret] || '',
-      redirect_uri: redirectUri(name),
+      redirect_uri: redirectUri(req, name),
       ...body,
     }),
   });
@@ -261,9 +268,9 @@ const deviceMac = async (ip) => {
   return mac === 'localhost' ? LOCAL_MAC : mac;
 };
 
-async function setSession(res, user, via, ip) {
+async function setSession(req, res, user, via, ip) {
   const sid = await startSession(user, via, ip);
-  const secure = BASE_URL.startsWith('https') ? ' Secure;' : '';
+  const secure = req.protocol === 'https' ? ' Secure;' : '';
   res.setHeader('set-cookie', `sid=${sid}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=604800`);
 }
 
@@ -303,7 +310,7 @@ app.get('/api/me', wrap(async (req, res) => {
   if (process.env.MAC_LOGIN !== 'false') {
     const user = userByMac(await deviceMac(ip));
     if (user) {
-      await setSession(res, user, 'device', ip);
+      await setSession(req, res, user, 'device', ip);
       await audit('signin', { userId: user.id, name: user.name, via: 'device', ip });
       return me(user, { via: 'device' });
     }
@@ -329,7 +336,7 @@ app.post('/api/login', wrap(async (req, res) => {
     throw fail(401, 'Wrong name or password');
   }
   clearFailures(ip);
-  await setSession(res, user, 'password', ip);
+  await setSession(req, res, user, 'password', ip);
   await audit('signin', { userId: user.id, name: user.name, via: 'password', ip });
   return me(user, { via: 'password' });
 }));
@@ -337,19 +344,19 @@ app.post('/api/login', wrap(async (req, res) => {
 /* ---------- passkeys (WebAuthn) ---------- */
 
 // The RP ID must be exactly the hostname the page is served from, and the origin must match
-// the full URL — both come from BASE_URL so dev and the VPS stay consistent.
-const RP_ID = new URL(BASE_URL).hostname;
-const RP_ORIGIN = new URL(BASE_URL).origin;
+// the full URL — both come from the real request so either of Caddy's two domains works.
+const rpIdOf = (req) => new URL(originOf(req)).hostname;
+const rpOriginOf = (req) => originOf(req);
 const RP_NAME = 'Dash';
 
 // Challenges are single-use and short-lived; losing them on restart is harmless.
 const challenges = new Map();
 const CHALLENGE_MS = 120_000;
 
-function putChallenge(res, challenge, userId = null) {
+function putChallenge(req, res, challenge, userId = null) {
   const id = crypto.randomBytes(16).toString('hex');
   challenges.set(id, { challenge, userId, expires: Date.now() + CHALLENGE_MS });
-  const secure = BASE_URL.startsWith('https') ? ' Secure;' : '';
+  const secure = req.protocol === 'https' ? ' Secure;' : '';
   res.setHeader('set-cookie', `wac=${id}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=120`);
 }
 
@@ -371,12 +378,12 @@ setInterval(() => {
 app.post('/api/login/passkey/options', wrap(async (req, res) => {
   throttle(clientIp(req));
   const options = await generateAuthenticationOptions({
-    rpID: RP_ID,
+    rpID: rpIdOf(req),
     // No allowCredentials: the browser offers whichever discoverable passkey matches this
     // site, so the person never types a name.
     userVerification: 'preferred',
   });
-  putChallenge(res, options.challenge);
+  putChallenge(req, res, options.challenge);
   return options;
 }));
 
@@ -396,8 +403,8 @@ app.post('/api/login/passkey', wrap(async (req, res) => {
   const verification = await verifyAuthenticationResponse({
     response,
     expectedChallenge: challenge,
-    expectedOrigin: RP_ORIGIN,
-    expectedRPID: RP_ID,
+    expectedOrigin: rpOriginOf(req),
+    expectedRPID: rpIdOf(req),
     credential: {
       id: found.passkey.id,
       publicKey: Buffer.from(found.passkey.publicKey, 'base64url'),
@@ -416,7 +423,7 @@ app.post('/api/login/passkey', wrap(async (req, res) => {
   // and storing the new value is what makes the check work next time.
   await touchPasskey(found.passkey.id, verification.authenticationInfo.newCounter);
   clearFailures(ip);
-  await setSession(res, found.user, 'passkey', ip);
+  await setSession(req, res, found.user, 'passkey', ip);
   await audit('signin', { userId: found.user.id, name: found.user.name, via: 'passkey', ip });
   return me(found.user, { via: 'passkey' });
 }));
@@ -480,7 +487,7 @@ app.get('/api/passkeys', wrap(async (req) =>
 app.post('/api/passkeys/options', wrap(async (req, res) => {
   const options = await generateRegistrationOptions({
     rpName: RP_NAME,
-    rpID: RP_ID,
+    rpID: rpIdOf(req),
     userID: Buffer.from(req.user.id, 'utf8'),
     userName: req.user.name,
     userDisplayName: req.user.name,
@@ -490,7 +497,7 @@ app.post('/api/passkeys/options', wrap(async (req, res) => {
     // Stops the same authenticator being enrolled twice.
     excludeCredentials: passkeysOf(req.user.id).map((p) => ({ id: p.id, transports: p.transports })),
   });
-  putChallenge(res, options.challenge, req.user.id);
+  putChallenge(req, res, options.challenge, req.user.id);
   return options;
 }));
 
@@ -503,8 +510,8 @@ app.post('/api/passkeys', wrap(async (req) => {
   const verification = await verifyRegistrationResponse({
     response: req.body?.response,
     expectedChallenge: challenge,
-    expectedOrigin: RP_ORIGIN,
-    expectedRPID: RP_ID,
+    expectedOrigin: rpOriginOf(req),
+    expectedRPID: rpIdOf(req),
   }).catch((e) => { throw fail(400, e.message); });
 
   if (!verification.verified) throw fail(400, 'passkey could not be verified');
@@ -555,7 +562,7 @@ app.post('/api/invites', wrap(async (req) => {
   await audit('invite-created', { by: req.user.name, inviteId: invite.id, role: invite.role });
   return {
     id: invite.id, role: invite.role, permissions: invite.permissions, expiresAt: invite.expiresAt,
-    link: `${BASE_URL}/invite/${invite.token}`,
+    link: `${originOf(req)}/invite/${invite.token}`,
   };
 }));
 
@@ -611,11 +618,11 @@ app.get('/auth/:name', (req, res) => {
   // Binds the callback to the session that started this flow, so a code an attacker got
   // for their own account can't be replayed into a victim's session (OAuth CSRF).
   const state = crypto.randomBytes(16).toString('hex');
-  const secure = BASE_URL.startsWith('https') ? ' Secure;' : '';
+  const secure = req.protocol === 'https' ? ' Secure;' : '';
   res.setHeader('set-cookie', `oas=${state}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=300`);
   const q = new URLSearchParams({
     client_id: process.env[p.id],
-    redirect_uri: redirectUri(req.params.name),
+    redirect_uri: redirectUri(req, req.params.name),
     response_type: 'code',
     scope: p.scope,
     state,
@@ -630,7 +637,7 @@ app.get('/auth/:name/callback', wrap(async (req, res) => {
   res.setHeader('set-cookie', 'oas=; HttpOnly; Path=/; Max-Age=0'); // single use either way
   if (!cookieState || cookieState !== req.query.state) throw fail(400, 'state mismatch — try connecting again');
   if (req.query.error) throw fail(400, String(req.query.error));
-  await exchange(req.user.id, req.params.name, { grant_type: 'authorization_code', code: String(req.query.code || '') });
+  await exchange(req.user.id, req.params.name, { grant_type: 'authorization_code', code: String(req.query.code || '') }, req);
   await audit('provider-connected', { by: req.user.name, provider: req.params.name });
   res.redirect('/');
 }));
@@ -1342,7 +1349,7 @@ const UPLOADS_PER_MIN = 30;
 function sameOrigin(req, res, next) {
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
-  const hostOk = (() => { try { return !origin || origin === RP_ORIGIN || new URL(origin).host === req.headers.host; } catch { return false; } })();
+  const hostOk = (() => { try { return !origin || new URL(origin).host === req.headers.host; } catch { return false; } })();
   if ((site && site !== 'same-origin' && site !== 'none') || !hostOk) {
     return res.status(403).json({ error: 'cross-site upload refused' });
   }
