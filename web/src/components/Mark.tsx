@@ -1,8 +1,15 @@
+// Dashboard brand symbol ("D de Dash"), on-dark variant from the logo kit:
+// white D-shape + Ember bar, tied to --accent so it tracks the brand token.
 export function Mark({ size = 24 }: { size?: number }) {
   return (
-    <svg className="mark" width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="7" fill="var(--accent)" />
-      <g fill="var(--bg)"><rect x="7" y="10" width="18" height="4" rx="2" /><rect x="7" y="18" width="10" height="4" rx="2" /><rect x="20" y="18" width="5" height="4" rx="1" /></g>
+    <svg className="mark" width={size} height={size} viewBox="0 0 256 256" aria-hidden="true">
+      <path
+        fill="#FFFFFF"
+        fillRule="evenodd"
+        d="M58,32 L102,32 A96,96 0 0 1 198,128 A96,96 0 0 1 102,224 L58,224 Z
+            M102,72 A56,56 0 0 1 158,128 A56,56 0 0 1 102,184 Z"
+      />
+      <rect x="102" y="119" width="66" height="18" rx="9" fill="var(--accent)" />
     </svg>
   );
 }

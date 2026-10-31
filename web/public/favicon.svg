@@ -1,1 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><style>.t{fill:#2f6fd6}.b{fill:#fff}@media(prefers-color-scheme:dark){.t{fill:#6ea8fe}.b{fill:#0f1115}}</style><rect class="t" width="32" height="32" rx="7"/><rect class="b" x="6" y="9" width="20" height="5" rx="2.5"/><rect class="b" x="6" y="18" width="11" height="5" rx="2.5"/><rect class="b" x="20" y="18" width="6" height="5" rx="1.5"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><title>Dashboard logo</title><g transform="translate(-35.84 -35.84) scale(1.28)">
+  <title id="titleAsmall">Dashboard - D de Dash (corte para tamaño pequeño / favicon)</title>
+  <path fill="#111111" fill-rule="evenodd" d="
+    M58,32 L102,32 A96,96 0 0 1 198,128 A96,96 0 0 1 102,224 L58,224 Z
+    M102,70 A58,58 0 0 1 160,128 A58,58 0 0 1 102,186 Z
+  "/>
+  <rect x="96" y="104" width="86" height="48" rx="24" fill="#111111"/>
+</g></svg>
